@@ -112,12 +112,17 @@ MK_CXXFLAGS = -std=c++11 -fPIC
 
 # -Ofast tends to produce faster code, but may not be available for some compilers.
 ifdef LLAMA_FAST
-MK_CFLAGS        += -Ofast
-MK_HOST_CXXFLAGS += -Ofast
-MK_CUDA_CXXFLAGS += -O3
+	MK_CFLAGS        += -Ofast
+	MK_HOST_CXXFLAGS += -Ofast
+	MK_CUDA_CXXFLAGS += -O3
+else ifdef LLAMA_DEBUG
+	MK_CFLAGS   += -O0 -g
+	MK_CXXFLAGS += -O0 -g
+	MK_LDFLAGS  += -g
 else
-MK_CFLAGS        += -O3
-MK_CXXFLAGS      += -O3
+	MK_CFLAGS        += -O3
+	MK_CXXFLAGS      += -O3
+	MK_CPPFLAGS += -DNDEBUG
 endif
 
 # clock_gettime came in POSIX.1b (1993)
@@ -160,14 +165,6 @@ ifeq ($(UNAME_S),NetBSD)
 endif
 ifeq ($(UNAME_S),OpenBSD)
 	MK_CPPFLAGS += -D_BSD_SOURCE
-endif
-
-ifdef LLAMA_DEBUG
-	MK_CFLAGS   += -O0 -g
-	MK_CXXFLAGS += -O0 -g
-	MK_LDFLAGS  += -g
-else
-	MK_CPPFLAGS += -DNDEBUG
 endif
 
 ifdef LLAMA_SERVER_VERBOSE
