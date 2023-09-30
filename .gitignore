@@ -19,7 +19,6 @@
 .venv
 .clang-tidy
 .vs/
-.vscode/
 
 lcov-report/
 gcovr-report/
