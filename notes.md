@@ -14,6 +14,7 @@ nvcc <objects>
 can be used to implicitly call both the device and host linkers. This works because if the device linker does not see any relocatable code it does not do anything.
 
 The following figure shows the flow.
+
 ![CUDA Separate Compilation Trajectory](./images/nvcc-options-for-separate-compilation.png)
 
 CUDA Separate Compilation Trajectory
