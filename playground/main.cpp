@@ -3,9 +3,15 @@
 #include <cstdint>
 
 // =======================================================================
-// Define
+// Constants
 // =======================================================================
-#define GGML_MEM_ALIGN 16
+#define GGML_MEM_ALIGN          16
+#define GGML_MAX_DIMS           4
+#define GGUF_DEFAULT_ALIGNMENT  32
+
+// =======================================================================
+// Macros
+// =======================================================================
 #define GGML_ASSERT(x) \
     do { \
         if (!(x)) { \
@@ -109,6 +115,44 @@ static const size_t GGUF_TYPE_SIZE[GGUF_TYPE_COUNT] = {
     [GGUF_TYPE_FLOAT64] = sizeof(double),
 };
 
+enum ggml_type {
+    GGML_TYPE_F32  = 0,
+    GGML_TYPE_F16  = 1,
+    GGML_TYPE_Q4_0 = 2,
+    GGML_TYPE_Q4_1 = 3,
+    // GGML_TYPE_Q4_2 = 4, support has been removed
+    // GGML_TYPE_Q4_3 (5) support has been removed
+    GGML_TYPE_Q5_0 = 6,
+    GGML_TYPE_Q5_1 = 7,
+    GGML_TYPE_Q8_0 = 8,
+    GGML_TYPE_Q8_1 = 9,
+    // k-quantizations
+    GGML_TYPE_Q2_K = 10,
+    GGML_TYPE_Q3_K = 11,
+    GGML_TYPE_Q4_K = 12,
+    GGML_TYPE_Q5_K = 13,
+    GGML_TYPE_Q6_K = 14,
+    GGML_TYPE_Q8_K = 15,
+    GGML_TYPE_I8,
+    GGML_TYPE_I16,
+    GGML_TYPE_I32,
+    GGML_TYPE_COUNT,
+};
+
+struct gguf_tensor_info {
+    struct gguf_str name;
+
+    uint32_t n_dims;
+    uint64_t ne[GGML_MAX_DIMS];
+
+    enum ggml_type type;
+
+    uint64_t offset; // offset from start of `data`, must be a multiple of `ALIGNMENT`
+
+    // for writing API
+    const void* data;
+    size_t size;
+};
 
 static void* ggml_aligned_malloc(size_t size) {
   void* aligned_memory = NULL;
@@ -200,20 +244,17 @@ int main() {
         ret = fread(&kv->key.n, 1, nitems, file);
         offset += nitems;
         printf("Key length = %d\n", kv->key.n);
-        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
 
         kv->key.data = (char*)calloc(kv->key.n + 1, 1);
         nitems = kv->key.n;
         ret = fread(kv->key.data, 1, nitems, file);
         offset += nitems;
         printf("Key = %s\n", kv->key.data);
-        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
 
         nitems = sizeof(kv->type);
         fread(&kv->type, 1, nitems, file);
         offset += nitems;
         printf("Type of value = %d\n", kv->type);
-        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
 
         switch (kv->type) {
             case GGUF_TYPE_UINT8:   
@@ -415,4 +456,59 @@ int main() {
         fflush(stdout);
     }
   }
+
+  // Read the tensor infos
+  {
+    printf("Read the tensor info\n");
+    ctx->infos = (struct gguf_tensor_info*)malloc(ctx->header.n_tensors * sizeof(struct gguf_tensor_info));
+    for (uint32_t i = 0; i < ctx->header.n_tensors; ++i) {
+        struct gguf_tensor_info* info = &ctx->infos[i];
+
+        for (int j = 0; j < GGML_MAX_DIMS; ++j) {
+            info->ne[j] = 1;
+        }
+
+        nitems = sizeof(info->name.n);
+        fread(&info->name.n, 1, nitems, file);
+        offset += nitems;
+        
+        info->name.data = (char*)calloc(info->name.n + 1, 1);
+        nitems = info->name.n;
+        fread(info->name.data, 1, nitems, file);
+        offset += nitems;
+        printf("Tensor name = %s\n", info->name.data);
+
+        nitems = sizeof(info->n_dims);
+        fread(&info->n_dims, 1, nitems, file);
+        offset += nitems;
+        printf("Tensor n_dims = %d\n", info->n_dims);
+
+        printf("Tensor dims = [");
+        for (uint32_t j = 0; j < info->n_dims; ++j) {
+            nitems = sizeof(info->ne[j]);
+            fread(&info->ne[j], 1, nitems, file);
+            offset += nitems;
+            if (j == 0) {
+                printf("%d", info->ne[j]);
+            } else {
+                printf(", %d", info->ne[j]);
+            }
+        }
+        printf("]\n");
+
+        nitems = sizeof(info->type);
+        fread(&info->type, 1, nitems, file);
+        offset += nitems;
+        printf("Tensor data type = %d\n", info->type);
+
+        nitems = sizeof(info->offset);
+        fread(&info->offset, 1, nitems, file);
+        offset += nitems;
+        printf("Tensor offset = %lld\n", info->offset);
+        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+        printf("\n");
+    }
+  }
+
+  ctx->alignment = GGUF_DEFAULT_ALIGNMENT;
 }
