@@ -1,4 +1,11 @@
 # =====================================
+# Motivation
+# =====================================
+I decided to understand this software comprehensively.  
+Read code linearly part by part. Determine!  
+Go to the edge of it.
+
+# =====================================
 # CUDA
 # =====================================
 ## NVCC Options for Separate Compilation
@@ -84,8 +91,6 @@ ldconfig
 # =====================================
 Code flow:
 ![Code flow](./images/llama.cpp.flow.png)
-
-Read code linearly part by part. Determine!
 
 ## &#9312; GGUF Model
 Ref: [gguf.md](https://github.com/philpax/ggml/blob/gguf-spec/docs/gguf.md)  
