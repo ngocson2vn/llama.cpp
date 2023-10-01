@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "configurations": [
       {
-          "name": "(gdb) Launch",
+          "name": "Debug llama.cpp",
           "type": "cppdbg",
           "request": "launch",
           "program": "/data00/home/son.nguyen/workspace/llama.cpp/main",
@@ -51,5 +51,46 @@
               }
           ]
       },
+      {
+        "name": "Debug playground",
+        "type": "cppdbg",
+        "request": "launch",
+        "program": "/data00/home/son.nguyen/workspace/llama.cpp/playground/main",
+        "args": [
+        ],
+        "stopAtEntry": true,
+        "cwd": "/data00/home/son.nguyen/workspace/llama.cpp/playground",
+        "linux": {
+            "sourceFileMap": {
+                "/proc/self/cwd": {
+                    "editorPath": "/data00/home/son.nguyen/workspace/llama.cpp/playground",
+                    "useForBreakpoints": false
+                }
+            }
+        },
+        "externalConsole": false,
+        "MIMode": "gdb",
+        "setupCommands": [
+            {
+                "description": "Test",
+                "text": "python import sys;sys.path.insert(0, '/data00/home/son.nguyen/workspace/tools/gdb_pretty_print/python'); from libstdcxx.v6.printers import register_libstdcxx_printers; register_libstdcxx_printers(None)",
+                "ignoreFailures": false
+            },
+            {
+                "description": "Enable pretty-printing for gdb",
+                "text": "-enable-pretty-printing",
+                "ignoreFailures": true
+            },
+            {
+                "description": "Set Disassembly Flavor to Intel",
+                "text": "-gdb-set disassembly-flavor intel",
+                "ignoreFailures": true
+            },
+            {
+                "description": "",
+                "text": "directory /data00/home/son.nguyen/workspace/llama.cpp/playground"
+            }
+        ]
+    },
   ]
 }

@@ -19,6 +19,26 @@ The following figure shows the flow.
 
 CUDA Separate Compilation Trajectory
 
+## CUDA C++ Programming
+Ref: https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+
+A routine decorated with host instructs the compiler to generate a host-callable entry point (i.e. compile it as host code). Such a routine is host code that can only be called from other host code.
+
+A routine decorated with device instructs the compiler to generate a device-callable entry point (i.e. compile it as device code). Such a routine is device code that can only be called from other device code.
+
+You can use both. If you use both, order does not matter. If you use both, the compiler generates both types of routines describe as above, one with a device-callable entry point, and one with a host-callable entry point.
+
+The only situation where device code can be “called from host code” is the kernel launch, which must be decorated with global
+
+[url]https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#function-declaration-specifiers[/url] 147
+
+A routine with none of the above decorations is treated by nvcc implicitly as if it were decorated with host
+
+### CUDA C++: Launch
+```bash
+sudo apt-get install libncurses5
+```
+
 # =====================================
 # llama.cpp
 # =====================================
@@ -56,8 +76,42 @@ ldconfig
 ./main -m models/llama-2-13b-chat.Q4_0.gguf -ngl 100 -p "What is a Large Language Model?"
 ```
 
+## Debug
+[VSCode launch.json](./.vscode/launch.json) 
+
 # =====================================
 # C++
 # =====================================
 Code flow:
 ![Code flow](./images/llama.cpp.flow.png)
+
+Read code linearly part by part. Determine!
+
+## &#9312; GGUF Model
+Ref: [gguf.md](https://github.com/philpax/ggml/blob/gguf-spec/docs/gguf.md)  
+Copy: [gguf.md](./docs/gguf.md)
+
+## &#9313; Parse Model
+### Understanding `posix_memalign`
+
+### /data00/home/son.nguyen/workspace/llama.cpp/common/common.cpp:802
+```c++
+llama_model * model  = llama_load_model_from_file(params.model.c_str(), mparams);
+```
+
+### /data00/home/son.nguyen/workspace/llama.cpp/llama.cpp:2516
+```c++
+llama_model_loader ml(fname, use_mmap);
+```
+
+### /data00/home/son.nguyen/workspace/llama.cpp/llama.cpp:1466
+```c++
+ctx_gguf = gguf_init_from_file(fname.c_str(), params);
+```
+
+
+## &#9314; Process Model
+
+## &#9315; Kernel Launch
+
+## &#9316; Kernel Code

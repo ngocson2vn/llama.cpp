@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "inttypes.h": "c",
+    "stdexcept": "cpp"
+  },
+  "memory-view.showMemoryPanel": true
+}
