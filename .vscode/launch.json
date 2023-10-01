@@ -58,7 +58,7 @@
         "program": "/data00/home/son.nguyen/workspace/llama.cpp/playground/main",
         "args": [
         ],
-        "stopAtEntry": true,
+        "stopAtEntry": false,
         "cwd": "/data00/home/son.nguyen/workspace/llama.cpp/playground",
         "linux": {
             "sourceFileMap": {

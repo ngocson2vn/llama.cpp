@@ -1,7 +1,8 @@
 {
   "files.associations": {
     "inttypes.h": "c",
-    "stdexcept": "cpp"
+    "stdexcept": "cpp",
+    "ggml.h": "c"
   },
   "memory-view.showMemoryPanel": true
 }

@@ -87,7 +87,23 @@ ldconfig
 [VSCode launch.json](./.vscode/launch.json) 
 
 # =====================================
-# C++
+# GDB
+# =====================================
+Run GDB command with `-exec` option in VSCode `DEBUG CONSOLE`:
+
+### Print size of a variable
+```bash
+-exec p sizeof(ctx->kv)
+```
+
+### Examine a memory address
+```bash
+-exec p ctx
+-exec x/72xb 0x4184c0
+```
+
+# =====================================
+# Reading Code
 # =====================================
 Code flow:
 ![Code flow](./images/llama.cpp.flow.png)

@@ -6,6 +6,13 @@
 // Define
 // =======================================================================
 #define GGML_MEM_ALIGN 16
+#define GGML_ASSERT(x) \
+    do { \
+        if (!(x)) { \
+            fprintf(stderr, "GGML_ASSERT: %s:%d: %s\n", __FILE__, __LINE__, #x); \
+            abort(); \
+        } \
+    } while (0)
 
 
 // =======================================================================
@@ -20,7 +27,7 @@ struct gguf_header {
 
 struct gguf_str {
     uint64_t n;  // GGUFv2
-    char * data;
+    char* data;
 };
 
 enum gguf_type {
@@ -84,6 +91,25 @@ struct gguf_context {
     void * data;
 };
 
+// Designated Initializers
+// https://gcc.gnu.org/onlinedocs/gcc-4.1.2/gcc/Designated-Inits.html
+static const size_t GGUF_TYPE_SIZE[GGUF_TYPE_COUNT] = {
+    [GGUF_TYPE_UINT8]   = sizeof(uint8_t),
+    [GGUF_TYPE_INT8]    = sizeof(int8_t),
+    [GGUF_TYPE_UINT16]  = sizeof(uint16_t),
+    [GGUF_TYPE_INT16]   = sizeof(int16_t),
+    [GGUF_TYPE_UINT32]  = sizeof(uint32_t),
+    [GGUF_TYPE_INT32]   = sizeof(int32_t),
+    [GGUF_TYPE_FLOAT32] = sizeof(float),
+    [GGUF_TYPE_BOOL]    = sizeof(bool),
+    [GGUF_TYPE_STRING]  = sizeof(struct gguf_str),
+    [GGUF_TYPE_ARRAY]   = 0, // undefined
+    [GGUF_TYPE_UINT64]  = sizeof(uint64_t),
+    [GGUF_TYPE_INT64]   = sizeof(int64_t),
+    [GGUF_TYPE_FLOAT64] = sizeof(double),
+};
+
+
 static void* ggml_aligned_malloc(size_t size) {
   void* aligned_memory = NULL;
   int result = posix_memalign(&aligned_memory, GGML_MEM_ALIGN, size);
@@ -102,11 +128,13 @@ FILE* file = nullptr;
 uint32_t magic = 0;
 size_t offset = 0;
 size_t nitems = 0;
+size_t ret = 0;
+bool ok = true;
 
 int main() {
   // Open model file
   {
-    printf("Open model file\n");
+    printf("== Open model file ==\n");
     file = fopen(model_file_path, "rb");
     if (!file) {
       printf("Could not read %s\n", model_file_path);
@@ -117,7 +145,7 @@ int main() {
 
   // Read magic number
   {
-    printf("Read magic number\n");
+    printf("== Read magic number ==\n");
     nitems = sizeof(magic);
     fread(&magic, 1, nitems, file);
     offset += nitems;
@@ -126,28 +154,265 @@ int main() {
     printf("\n");
   }
 
+  struct gguf_context* ctx = (struct gguf_context*)ggml_aligned_malloc(sizeof(struct gguf_context));
+
   // Read header
   {
-    printf("Read header\n");
-    struct gguf_context* ctx = (struct gguf_context*)ggml_aligned_malloc(sizeof(struct gguf_context));
+    printf("== Read header ==\n");
     ctx->header.magic = magic;
+
+    // version
+    nitems = sizeof(ctx->header.version);
+    fread(&ctx->header.version, 1, nitems, file);
+    offset += nitems;
+    printf("header.version = %d\n", ctx->header.version);
+    printf("Current offset = %d; current file offset = %d\n", offset, ftell(file));
+    printf("\n");
 
     // n_tensors
     nitems = sizeof(ctx->header.n_tensors);
     fread(&ctx->header.n_tensors, 1, nitems, file);
     offset += nitems;
+    printf("header.n_tensors = %d\n", ctx->header.n_tensors);
     printf("Current offset = %d; current file offset = %d\n", offset, ftell(file));
+    printf("\n");
 
     // n_kv
     nitems = sizeof(ctx->header.n_kv);
     fread(&ctx->header.n_kv, 1, nitems, file);
     offset += nitems;
-    printf("Current offset = %d; current file offset = %d\n", offset, ftell(file));
+    printf("header.n_kv = %d\n", ctx->header.n_kv);
+    printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
     printf("\n");
   }
 
   // Read the kv pairs
   {
+    printf("== Read the kv pairs ==\n");
+    size_t kv_buf_size = ctx->header.n_kv * sizeof(struct gguf_kv);
+    void* kv_ptr = malloc(kv_buf_size);
+    ctx->kv = (struct gguf_kv*)kv_ptr;
 
+    for (uint32_t i = 0; i < ctx->header.n_kv; ++i) {
+        struct gguf_kv* kv = &ctx->kv[i];
+
+        nitems = sizeof(kv->key.n);
+        ret = fread(&kv->key.n, 1, nitems, file);
+        offset += nitems;
+        printf("Key length = %d\n", kv->key.n);
+        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+
+        kv->key.data = (char*)calloc(kv->key.n + 1, 1);
+        nitems = kv->key.n;
+        ret = fread(kv->key.data, 1, nitems, file);
+        offset += nitems;
+        printf("Key = %s\n", kv->key.data);
+        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+
+        nitems = sizeof(kv->type);
+        fread(&kv->type, 1, nitems, file);
+        offset += nitems;
+        printf("Type of value = %d\n", kv->type);
+        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+
+        switch (kv->type) {
+            case GGUF_TYPE_UINT8:   
+            {
+                nitems = sizeof(kv->value.uint8);
+                fread(&kv->value.uint8, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.uint8);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_INT8:
+            {
+                nitems = sizeof(kv->value.int8);
+                fread(&kv->value.int8, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.int8);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_UINT16:
+            {
+                nitems = sizeof(kv->value.uint16);
+                fread(&kv->value.uint16, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.uint16);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_INT16:
+            {
+                nitems = sizeof(kv->value.int16);
+                fread(&kv->value.int16, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.int16);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_UINT32:
+            {
+                nitems = sizeof(kv->value.uint32);
+                fread(&kv->value.uint32, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.uint32);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_INT32:
+            {
+                nitems = sizeof(kv->value.int32);
+                fread(&kv->value.int32, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.int32);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_FLOAT32:
+            {
+                nitems = sizeof(kv->value.float32);
+                fread(&kv->value.float32, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.float32);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_UINT64:
+            {
+                nitems = sizeof(kv->value.uint64);
+                fread(&kv->value.uint64, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.uint64);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_INT64:
+            {
+                nitems = sizeof(kv->value.int64);
+                fread(&kv->value.int64, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.int64);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_FLOAT64:
+            {
+                nitems = sizeof(kv->value.float64);
+                fread(&kv->value.float64, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.float64);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_BOOL:
+            {
+                nitems = sizeof(kv->value.bool_);
+                fread(&kv->value.bool_, 1, nitems, file);
+                offset += nitems;
+                printf("Value = %d\n", kv->value.bool_);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_STRING:
+            {
+                nitems = sizeof(kv->value.str.n);
+                fread(&kv->value.str.n, 1, nitems, file);
+                offset += nitems;
+                
+                kv->value.str.data = (char*)calloc(kv->value.str.n + 1, 1);
+                nitems = kv->value.str.n;
+                fread(kv->value.str.data, 1, nitems, file);
+                offset += nitems;
+
+                printf("Value = %s\n", kv->value.str.data);
+                printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+                break;
+            }
+            case GGUF_TYPE_ARRAY:
+            {
+                nitems = sizeof(kv->value.arr.type);
+                fread(&kv->value.arr.type, 1, nitems, file);
+                offset += nitems;
+                nitems = sizeof(kv->value.arr.n);
+                fread(&kv->value.arr.n, 1, nitems, file);
+                offset += nitems;
+
+                switch (kv->value.arr.type) {
+                    case GGUF_TYPE_UINT8:
+                    case GGUF_TYPE_INT8:
+                    case GGUF_TYPE_UINT16:
+                    case GGUF_TYPE_INT16:
+                    case GGUF_TYPE_UINT32:
+                    case GGUF_TYPE_INT32:
+                    case GGUF_TYPE_FLOAT32:
+                    case GGUF_TYPE_UINT64:
+                    case GGUF_TYPE_INT64:
+                    case GGUF_TYPE_FLOAT64:
+                    case GGUF_TYPE_BOOL:
+                    {
+                        nitems = kv->value.arr.n * GGUF_TYPE_SIZE[kv->value.arr.type];
+                        kv->value.arr.data = malloc(nitems);
+                        fread(kv->value.arr.data, 1, nitems, file);
+                        offset += nitems;
+
+                        printf("Value = %p\n", kv->value.arr.data);
+                        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+
+                        break;
+                    }
+                    case GGUF_TYPE_STRING:
+                    {
+                        size_t buf_size = kv->value.arr.n * sizeof(struct gguf_str);
+                        kv->value.arr.data = malloc(buf_size);
+                        struct gguf_str* arr = (struct gguf_str*)kv->value.arr.data;
+                        for (uint32_t j = 0; j < kv->value.arr.n; ++j) {
+                            struct gguf_str* p = &arr[j];
+                            p->n = 0;
+                            p->data = nullptr;
+                            
+                            nitems = sizeof(p->n);
+                            fread(&p->n, 1, nitems, file);
+                            offset += nitems;
+
+                            p->data = (char*)calloc(p->n + 1, 1);
+                            nitems = p->n;
+                            fread(p->data, 1, nitems, file);
+                            offset += nitems;
+                        }
+
+                        printf("Value = [");
+                        size_t i = 0;
+                        for (; i < kv->value.arr.n; i++) {
+                            if (i == 0) {
+                                printf("\"%s\"", arr[i].data);
+                            } else if (i == 999) {
+                                printf(", ...");
+                                break;
+                            } else {
+                                printf(", \"%s\"", arr[i].data);
+                            }
+                        }
+                        if (i < kv->value.arr.n - 1) {
+                            printf(", \"%s\"", arr[kv->value.arr.n - 1].data);
+                        }
+                        printf("]\n");
+                        printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
+
+                        break;
+                    }
+                    case GGUF_TYPE_ARRAY:
+                    case GGUF_TYPE_COUNT: GGML_ASSERT(false && "invalid type"); break;
+                }
+
+                break;
+            }
+            case GGUF_TYPE_COUNT: GGML_ASSERT(false && "invalid type");
+        }
+
+        printf("\n");
+        fflush(stdout);
+    }
   }
 }
