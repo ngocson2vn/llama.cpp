@@ -1,8 +1,15 @@
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <unistd.h>
+
+#include <cinttypes>
 #include <climits>
 #include <cstdarg>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <queue>
+#include <regex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,24 +33,21 @@ static void* ggml_aligned_malloc(size_t size) {
   void* aligned_memory = NULL;
   int result = posix_memalign(&aligned_memory, GGML_MEM_ALIGN, size);
   if (result != 0) {
-    fprintf(
-        stderr,
-        "Could not allocate memory chunk with size = %d and alignment = %d\n",
-        size, GGML_MEM_ALIGN);
+    fprintf(stderr, "Could not allocate memory chunk with size = %d and alignment = %d\n", size, GGML_MEM_ALIGN);
   }
 
   return aligned_memory;
 }
 
-void gguf_free(struct gguf_context* ctx) {
-  if (ctx == NULL) {
+void gguf_free(struct gguf_context* gguf_ctx) {
+  if (gguf_ctx == NULL) {
     return;
   }
 
-  if (ctx->kv) {
+  if (gguf_ctx->kv) {
     // free string memory - not great..
-    for (uint32_t i = 0; i < ctx->header.n_kv; ++i) {
-      struct gguf_kv* kv = &ctx->kv[i];
+    for (uint32_t i = 0; i < gguf_ctx->header.n_kv; ++i) {
+      struct gguf_kv* kv = &gguf_ctx->kv[i];
 
       if (kv->key.data) {
         free(kv->key.data);
@@ -70,22 +74,22 @@ void gguf_free(struct gguf_context* ctx) {
       }
     }
 
-    free(ctx->kv);
+    free(gguf_ctx->kv);
   }
 
-  if (ctx->infos) {
-    for (uint32_t i = 0; i < ctx->header.n_tensors; ++i) {
-      struct gguf_tensor_info* info = &ctx->infos[i];
+  if (gguf_ctx->infos) {
+    for (uint32_t i = 0; i < gguf_ctx->header.n_tensors; ++i) {
+      struct gguf_tensor_info* info = &gguf_ctx->infos[i];
 
       if (info->name.data) {
         free(info->name.data);
       }
     }
 
-    free(ctx->infos);
+    free(gguf_ctx->infos);
   }
 
-  free(ctx);
+  free(gguf_ctx);
 }
 
 static void ggml_setup_op_has_task_pass(void) {
@@ -205,15 +209,11 @@ struct ggml_context* ggml_init(struct ggml_init_params params) {
     params.mem_size = GGML_MEM_ALIGN;
   }
 
-  const size_t mem_size = params.mem_buffer
-                              ? params.mem_size
-                              : GGML_PAD(params.mem_size, GGML_MEM_ALIGN);
+  const size_t mem_size = params.mem_buffer ? params.mem_size : GGML_PAD(params.mem_size, GGML_MEM_ALIGN);
 
   *ctx = (struct ggml_context){
       /*.mem_size           =*/mem_size,
-      /*.mem_buffer         =*/params.mem_buffer
-          ? params.mem_buffer
-          : ggml_aligned_malloc(mem_size),
+      /*.mem_buffer         =*/params.mem_buffer ? params.mem_buffer : ggml_aligned_malloc(mem_size),
       /*.mem_buffer_owned   =*/params.mem_buffer ? false : true,
       /*.no_alloc           =*/params.no_alloc,
       /*.no_alloc_save      =*/params.no_alloc,
@@ -264,9 +264,7 @@ size_t ggml_nbytes(const struct ggml_tensor* tensor) {
   return nbytes;
 }
 
-static struct ggml_object* ggml_new_object(struct ggml_context* ctx,
-                                           enum ggml_object_type type,
-                                           size_t size) {
+static struct ggml_object* ggml_new_object(struct ggml_context* ctx, enum ggml_object_type type, size_t size) {
   // always insert objects at the end of the context's memory pool
   struct ggml_object* obj_cur = ctx->objects_end;
 
@@ -278,8 +276,7 @@ static struct ggml_object* ggml_new_object(struct ggml_context* ctx,
   size_t size_needed = GGML_PAD(size, GGML_MEM_ALIGN);
 
   char* const mem_buffer = (char*)ctx->mem_buffer;
-  struct ggml_object* const obj_new =
-      (struct ggml_object*)(mem_buffer + cur_end);
+  struct ggml_object* const obj_new = (struct ggml_object*)(mem_buffer + cur_end);
 
   if (cur_end + size_needed + GGML_OBJECT_SIZE > ctx->mem_size) {
     // GGML_PRINT("%s: not enough space in the context's memory pool (needed
@@ -314,11 +311,8 @@ static struct ggml_object* ggml_new_object(struct ggml_context* ctx,
   return obj_new;
 }
 
-static struct ggml_tensor* ggml_new_tensor_impl(struct ggml_context* ctx,
-                                                enum ggml_type type, int n_dims,
-                                                const int64_t* ne,
-                                                struct ggml_tensor* view_src,
-                                                size_t view_offs) {
+static struct ggml_tensor* ggml_new_tensor_impl(struct ggml_context* ctx, enum ggml_type type, int n_dims,
+                                                const int64_t* ne, struct ggml_tensor* view_src, size_t view_offs) {
   assert(n_dims >= 1 && n_dims <= GGML_MAX_DIMS);
 
   // find the base tensor and absolute offset
@@ -327,14 +321,12 @@ static struct ggml_tensor* ggml_new_tensor_impl(struct ggml_context* ctx,
     view_src = view_src->view_src;
   }
 
-  size_t data_size =
-      type_traits[type].type_size * (ne[0] / type_traits[type].blck_size);
+  size_t data_size = type_traits[type].type_size * (ne[0] / type_traits[type].blck_size);
   for (int i = 1; i < n_dims; i++) {
     data_size *= ne[i];
   }
 
-  GGML_ASSERT(view_src == NULL ||
-              data_size + view_offs <= ggml_nbytes(view_src));
+  GGML_ASSERT(view_src == NULL || data_size + view_offs <= ggml_nbytes(view_src));
 
   void* data = view_src != NULL ? view_src->data : NULL;
   if (data != NULL) {
@@ -364,14 +356,12 @@ static struct ggml_tensor* ggml_new_tensor_impl(struct ggml_context* ctx,
   }
 
   struct ggml_object* const obj_new =
-      ggml_new_object(ctx, (ggml_object_type)GGML_OBJECT_TENSOR,
-                      GGML_TENSOR_SIZE + obj_alloc_size);
+      ggml_new_object(ctx, (ggml_object_type)GGML_OBJECT_TENSOR, GGML_TENSOR_SIZE + obj_alloc_size);
 
   // TODO: for recoverable errors, we would need to free the data allocated from
   // the scratch buffer here
 
-  struct ggml_tensor* const result =
-      (struct ggml_tensor*)((char*)ctx->mem_buffer + obj_new->offs);
+  struct ggml_tensor* const result = (struct ggml_tensor*)((char*)ctx->mem_buffer + obj_new->offs);
 
   *result = (struct ggml_tensor){
       /*.type         =*/type,
@@ -395,8 +385,7 @@ static struct ggml_tensor* ggml_new_tensor_impl(struct ggml_context* ctx,
       /*.padding      =*/{0},
   };
 
-  // TODO: this should not be needed as long as we don't rely on aligned SIMD
-  // loads
+  // TODO: this should not be needed as long as we don't rely on aligned SIMD loads
   // ggml_assert_aligned(result->data);
 
   for (int i = 0; i < n_dims; i++) {
@@ -414,14 +403,11 @@ static struct ggml_tensor* ggml_new_tensor_impl(struct ggml_context* ctx,
   return result;
 }
 
-struct ggml_tensor* ggml_new_tensor(struct ggml_context* ctx,
-                                    enum ggml_type type, int n_dims,
-                                    const int64_t* ne) {
+struct ggml_tensor* ggml_new_tensor(struct ggml_context* ctx, enum ggml_type type, int n_dims, const int64_t* ne) {
   return ggml_new_tensor_impl(ctx, type, n_dims, ne, NULL, 0);
 }
 
-struct ggml_tensor* ggml_set_name(struct ggml_tensor* tensor,
-                                  const char* name) {
+struct ggml_tensor* ggml_set_name(struct ggml_tensor* tensor, const char* name) {
   strncpy(tensor->name, name, sizeof(tensor->name));
   tensor->name[sizeof(tensor->name) - 1] = '\0';
   return tensor;
@@ -437,8 +423,7 @@ void ggml_free(struct ggml_context* ctx) {
     if (&g_state.contexts[i].context == ctx) {
       g_state.contexts[i].used = false;
 
-      GGML_PRINT_DEBUG("%s: context %d has been freed. memory used = %zu\n",
-                       __func__, i, ggml_used_mem(ctx));
+      GGML_PRINT_DEBUG("%s: context %d has been freed. memory used = %zu\n", __func__, i, ggml_used_mem(ctx));
 
       if (ctx->mem_buffer_owned) {
         free(ctx->mem_buffer);
@@ -456,8 +441,7 @@ void ggml_free(struct ggml_context* ctx) {
   // ggml_critical_section_end();
 }
 
-struct ggml_tensor* ggml_get_tensor(struct ggml_context* ctx,
-                                    const char* name) {
+struct ggml_tensor* ggml_get_tensor(struct ggml_context* ctx, const char* name) {
   struct ggml_object* obj = ctx->objects_begin;
 
   char* const mem_buffer = (char*)ctx->mem_buffer;
@@ -476,14 +460,61 @@ struct ggml_tensor* ggml_get_tensor(struct ggml_context* ctx,
   return NULL;
 }
 
+struct ggml_tensor* create_tensor_for(struct ggml_context* ctx, struct ggml_tensor* meta, ggml_backend backend) {
+  if (backend != GGML_BACKEND_CPU) {
+    ctx->no_alloc = true;
+  }
+
+  struct ggml_tensor* tensor = ggml_new_tensor(ctx, meta->type, meta->n_dims, meta->ne);
+  tensor->backend = backend;
+  ggml_set_name(tensor, meta->name);
+
+  if (backend != GGML_BACKEND_CPU) {
+    ctx->no_alloc = true;
+  }
+
+  return tensor;
+}
+
+int gguf_find_key(const struct gguf_context* gguf_ctx, const char* key) {
+  // return -1 if key not found
+  int keyfound = -1;
+
+  const uint64_t n_kv = gguf_ctx->header.n_kv;
+
+  for (uint64_t i = 0; i < n_kv; ++i) {
+    if (strcmp(key, gguf_ctx->kv[i].key.data) == 0) {
+      keyfound = i;
+      break;
+    }
+  }
+
+  return keyfound;
+}
+
+bool ggml_is_numa(void) { return g_state.numa.n_nodes > 1; }
+
+int gguf_find_tensor(const struct gguf_context* ctx, const char* name) {
+  // return -1 if tensor not found
+  int tensorfound = -1;
+
+  for (int i = 0; i < ctx->header.n_tensors; ++i) {
+    if (strcmp(name, ctx->infos[i].name.data) == 0) {
+      tensorfound = i;
+      break;
+    }
+  }
+
+  return tensorfound;
+}
+
 static size_t utf8_len(char src) {
   const size_t lookup[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 4};
   uint8_t highbits = static_cast<uint8_t>(src) >> 4;
   return lookup[highbits];
 }
 
-static void replace_all(std::string& s, const std::string& search,
-                        const std::string& replace) {
+static void replace_all(std::string& s, const std::string& search, const std::string& replace) {
   std::string result;
   for (size_t pos = 0;; pos += search.length()) {
     auto new_pos = s.find(search, pos);
@@ -504,10 +535,19 @@ static void zeros(std::ofstream& file, size_t n) {
   }
 }
 
+std::string build_llm_key(const std::string& original_key, const std::string& arch_name) {
+  if (original_key.find("%s") >= 0) {
+    char* key = (char*)calloc((original_key.length() - 2) + arch_name.length() + 1, 1);
+    sprintf(key, original_key.c_str(), arch_name.c_str());
+    return key;
+  }
+
+  return original_key;
+}
+
 #ifdef __GNUC__
 #ifdef __MINGW32__
-#define LLAMA_ATTRIBUTE_FORMAT(...) \
-  __attribute__((format(gnu_printf, __VA_ARGS__)))
+#define LLAMA_ATTRIBUTE_FORMAT(...) __attribute__((format(gnu_printf, __VA_ARGS__)))
 #else
 #define LLAMA_ATTRIBUTE_FORMAT(...) __attribute__((format(printf, __VA_ARGS__)))
 #endif
@@ -564,18 +604,6 @@ enum e_model {
   MODEL_70B,
 };
 
-enum llm_arch {
-  LLM_ARCH_LLAMA,
-  LLM_ARCH_FALCON,
-  LLM_ARCH_BAICHUAN,
-  LLM_ARCH_GPT2,
-  LLM_ARCH_GPTJ,
-  LLM_ARCH_GPTNEOX,
-  LLM_ARCH_MPT,
-  LLM_ARCH_STARCODER,
-  LLM_ARCH_UNKNOWN,
-};
-
 struct llama_hparams {
   bool vocab_only;
   uint32_t n_vocab;
@@ -594,8 +622,7 @@ struct llama_hparams {
   float rope_freq_scale_train;
 
   bool operator!=(const llama_hparams& other) const {
-    return static_cast<bool>(
-        memcmp(this, &other, sizeof(llama_hparams)));  // NOLINT
+    return static_cast<bool>(memcmp(this, &other, sizeof(llama_hparams)));  // NOLINT
   }
 
   uint32_t n_gqa() const { return n_head / n_head_kv; }
@@ -715,30 +742,94 @@ struct llama_buffer {
   }
 };
 
+struct llama_file {
+  // use FILE * so we don't have to re-open the file to mmap
+  FILE* fp;
+  size_t size;
+
+  llama_file(const char* fname, const char* mode) {
+    fp = std::fopen(fname, mode);
+    if (fp == NULL) {
+      throw std::runtime_error(format("failed to open %s: %s", fname, strerror(errno)));
+    }
+    seek(0, SEEK_END);
+    size = tell();
+    seek(0, SEEK_SET);
+  }
+
+  size_t tell() const {
+    long ret = std::ftell(fp);
+    GGML_ASSERT(ret != -1);  // this really shouldn't fail
+    return (size_t)ret;
+  }
+
+  void seek(size_t offset, int whence) const {
+    int ret = std::fseek(fp, (long)offset, whence);
+    GGML_ASSERT(ret == 0);  // same
+  }
+
+  void read_raw(void* ptr, size_t len) const {
+    if (len == 0) {
+      return;
+    }
+    errno = 0;
+    std::size_t ret = std::fread(ptr, len, 1, fp);
+    if (ferror(fp)) {
+      throw std::runtime_error(format("read error: %s", strerror(errno)));
+    }
+    if (ret != 1) {
+      throw std::runtime_error(std::string("unexpectedly reached end of file"));
+    }
+  }
+
+  uint32_t read_u32() const {
+    uint32_t ret;
+    read_raw(&ret, sizeof(ret));
+    return ret;
+  }
+
+  void write_raw(const void* ptr, size_t len) const {
+    if (len == 0) {
+      return;
+    }
+    errno = 0;
+    size_t ret = std::fwrite(ptr, len, 1, fp);
+    if (ret != 1) {
+      throw std::runtime_error(format("write error: %s", strerror(errno)));
+    }
+  }
+
+  void write_u32(std::uint32_t val) const { write_raw(&val, sizeof(val)); }
+
+  ~llama_file() {
+    if (fp) {
+      std::fclose(fp);
+    }
+  }
+};
+
 struct llama_mmap {
   void* addr;
   size_t size;
 
   llama_mmap(const llama_mmap&) = delete;
 
-#ifdef _POSIX_MAPPED_FILES
   static constexpr bool SUPPORTED = true;
 
-  llama_mmap(struct llama_file* file,
-             size_t prefetch = (size_t)-1 /* -1 = max value */,
-             bool numa = false) {
+  llama_mmap(struct llama_file* file, size_t prefetch = (size_t)-1 /* -1 = max value */, bool numa = false) {
     size = file->size;
     int fd = fileno(file->fp);
     int flags = MAP_SHARED;
+
     // prefetch/readahead impairs performance on NUMA systems
     if (numa) {
       prefetch = 0;
     }
-#ifdef __linux__
+
     if (prefetch) {
       flags |= MAP_POPULATE;
     }
-#endif
+
     addr = mmap(NULL, file->size, PROT_READ, flags, fd, 0);
     if (addr == MAP_FAILED) {
       throw std::runtime_error(format("mmap failed: %s", strerror(errno)));
@@ -746,95 +837,21 @@ struct llama_mmap {
 
     if (prefetch > 0) {
       // Advise the kernel to preload the mapped memory
-      if (posix_madvise(addr, std::min(file->size, prefetch),
-                        POSIX_MADV_WILLNEED)) {
-        fprintf(stderr,
-                "warning: posix_madvise(.., POSIX_MADV_WILLNEED) failed: %s\n",
-                strerror(errno));
+      if (posix_madvise(addr, std::min(file->size, prefetch), POSIX_MADV_WILLNEED)) {
+        fprintf(stderr, "warning: posix_madvise(.., POSIX_MADV_WILLNEED) failed: %s\n", strerror(errno));
       }
     }
+
     if (numa) {
       // advise the kernel not to use readahead
       // (because the next page might not belong on the same node)
       if (posix_madvise(addr, file->size, POSIX_MADV_RANDOM)) {
-        fprintf(stderr,
-                "warning: posix_madvise(.., POSIX_MADV_RANDOM) failed: %s\n",
-                strerror(errno));
+        fprintf(stderr, "warning: posix_madvise(.., POSIX_MADV_RANDOM) failed: %s\n", strerror(errno));
       }
     }
   }
 
   ~llama_mmap() { munmap(addr, size); }
-#elif defined(_WIN32)
-  static constexpr bool SUPPORTED = true;
-
-  llama_mmap(struct llama_file* file, bool prefetch = true, bool numa = false) {
-    (void)numa;
-
-    size = file->size;
-
-    HANDLE hFile = (HANDLE)_get_osfhandle(_fileno(file->fp));
-
-    HANDLE hMapping =
-        CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    DWORD error = GetLastError();
-
-    if (hMapping == NULL) {
-      throw std::runtime_error(format("CreateFileMappingA failed: %s",
-                                      llama_format_win_err(error).c_str()));
-    }
-
-    addr = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
-    error = GetLastError();
-    CloseHandle(hMapping);
-
-    if (addr == NULL) {
-      throw std::runtime_error(format("MapViewOfFile failed: %s",
-                                      llama_format_win_err(error).c_str()));
-    }
-
-    if (prefetch) {
-      // PrefetchVirtualMemory is only present on Windows 8 and above, so we
-      // dynamically load it
-      BOOL(WINAPI * pPrefetchVirtualMemory)
-      (HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
-      HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-
-      // may fail on pre-Windows 8 systems
-      pPrefetchVirtualMemory =
-          reinterpret_cast<decltype(pPrefetchVirtualMemory)>(
-              GetProcAddress(hKernel32, "PrefetchVirtualMemory"));
-
-      if (pPrefetchVirtualMemory) {
-        // advise the kernel to preload the mapped memory
-        WIN32_MEMORY_RANGE_ENTRY range;
-        range.VirtualAddress = addr;
-        range.NumberOfBytes = (SIZE_T)size;
-        if (!pPrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0)) {
-          fprintf(stderr, "warning: PrefetchVirtualMemory failed: %s\n",
-                  llama_format_win_err(GetLastError()).c_str());
-        }
-      }
-    }
-  }
-
-  ~llama_mmap() {
-    if (!UnmapViewOfFile(addr)) {
-      fprintf(stderr, "warning: UnmapViewOfFile failed: %s\n",
-              llama_format_win_err(GetLastError()).c_str());
-    }
-  }
-#else
-  static constexpr bool SUPPORTED = false;
-
-  llama_mmap(struct llama_file* file, bool prefetch = true, bool numa = false) {
-    (void)file;
-    (void)prefetch;
-    (void)numa;
-
-    throw std::runtime_error(std::string("mmap not supported"));
-  }
-#endif
 };
 
 // Represents some region of memory being locked using mlock or VirtualLock;
@@ -918,64 +935,10 @@ struct llama_mlock {
 
   static void raw_unlock(void* addr, size_t size) {
     if (munlock(addr, size)) {
-      fprintf(stderr, "warning: failed to munlock buffer: %s\n",
-              std::strerror(errno));
-    }
-  }
-#elif defined(_WIN32)
-  static constexpr bool SUPPORTED = true;
-
-  static size_t lock_granularity() {
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    return (size_t)si.dwPageSize;
-  }
-
-  bool raw_lock(void* ptr, size_t len) const {
-    for (int tries = 1;; tries++) {
-      if (VirtualLock(ptr, len)) {
-        return true;
-      }
-      if (tries == 2) {
-        fprintf(stderr,
-                "warning: failed to VirtualLock %zu-byte buffer (after "
-                "previously locking %zu bytes): %s\n",
-                len, size, llama_format_win_err(GetLastError()).c_str());
-        return false;
-      }
-
-      // It failed but this was only the first try; increase the working
-      // set size and try again.
-      SIZE_T min_ws_size, max_ws_size;
-      if (!GetProcessWorkingSetSize(GetCurrentProcess(), &min_ws_size,
-                                    &max_ws_size)) {
-        fprintf(stderr, "warning: GetProcessWorkingSetSize failed: %s\n",
-                llama_format_win_err(GetLastError()).c_str());
-        return false;
-      }
-      // Per MSDN: "The maximum number of pages that a process can lock
-      // is equal to the number of pages in its minimum working set minus
-      // a small overhead."
-      // Hopefully a megabyte is enough overhead:
-      size_t increment = len + 1048576;
-      // The minimum must be <= the maximum, so we need to increase both:
-      min_ws_size += increment;
-      max_ws_size += increment;
-      if (!SetProcessWorkingSetSize(GetCurrentProcess(), min_ws_size,
-                                    max_ws_size)) {
-        fprintf(stderr, "warning: SetProcessWorkingSetSize failed: %s\n",
-                llama_format_win_err(GetLastError()).c_str());
-        return false;
-      }
+      fprintf(stderr, "warning: failed to munlock buffer: %s\n", std::strerror(errno));
     }
   }
 
-  static void raw_unlock(void* ptr, size_t len) {
-    if (!VirtualUnlock(ptr, len)) {
-      fprintf(stderr, "warning: failed to VirtualUnlock buffer: %s\n",
-              llama_format_win_err(GetLastError()).c_str());
-    }
-  }
 #else
   static constexpr bool SUPPORTED = false;
 
@@ -1048,8 +1011,22 @@ struct llama_model {
   }
 };
 
-static void llama_log_callback_default(ggml_log_level level, const char* text,
-                                       void* user_data) {
+struct llama_model_params llama_model_default_params() {
+  struct llama_model_params result = {
+      /*.n_gpu_layers                =*/0,
+      /*.main_gpu                    =*/0,
+      /*.tensor_split                =*/nullptr,
+      /*.progress_callback           =*/nullptr,
+      /*.progress_callback_user_data =*/nullptr,
+      /*.vocab_only                  =*/false,
+      /*.use_mmap                    =*/true,
+      /*.use_mlock                   =*/false,
+  };
+
+  return result;
+}
+
+static void llama_log_callback_default(ggml_log_level level, const char* text, void* user_data) {
   (void)level;
   (void)user_data;
   fputs(text, stderr);
@@ -1064,21 +1041,18 @@ struct llama_state {
 
 static llama_state g_llama_state;
 
-static void llama_log_internal_v(ggml_log_level level, const char* format,
-                                 va_list args) {
+static void llama_log_internal_v(ggml_log_level level, const char* format, va_list args) {
   va_list args_copy;
   va_copy(args_copy, args);
   char buffer[128];
   int len = vsnprintf(buffer, 128, format, args);
   if (len < 128) {
-    g_llama_state.log_callback(level, buffer,
-                               g_llama_state.log_callback_user_data);
+    g_llama_state.log_callback(level, buffer, g_llama_state.log_callback_user_data);
   } else {
     char* buffer2 = new char[len + 1];
     vsnprintf(buffer2, len + 1, format, args_copy);
     buffer2[len] = 0;
-    g_llama_state.log_callback(level, buffer2,
-                               g_llama_state.log_callback_user_data);
+    g_llama_state.log_callback(level, buffer2, g_llama_state.log_callback_user_data);
     delete[] buffer2;
   }
   va_end(args_copy);
@@ -1089,6 +1063,81 @@ static void llama_log_internal(ggml_log_level level, const char* format, ...) {
   va_start(args, format);
   llama_log_internal_v(level, format, args);
   va_end(args);
+}
+
+static const char* llama_model_type_name(e_model type) {
+  switch (type) {
+    case MODEL_1B:
+      return "1B";
+    case MODEL_3B:
+      return "3B";
+    case MODEL_7B:
+      return "7B";
+    case MODEL_13B:
+      return "13B";
+    case MODEL_15B:
+      return "15B";
+    case MODEL_30B:
+      return "30B";
+    case MODEL_34B:
+      return "34B";
+    case MODEL_40B:
+      return "40B";
+    case MODEL_65B:
+      return "65B";
+    case MODEL_70B:
+      return "70B";
+    default:
+      return "?B";
+  }
+}
+
+static std::string llama_model_ftype_name(llama_ftype ftype) {
+  if (ftype & LLAMA_FTYPE_GUESSED) {
+    return llama_model_ftype_name((enum llama_ftype)(ftype & ~LLAMA_FTYPE_GUESSED)) + " (guessed)";
+  }
+
+  switch (ftype) {
+    case LLAMA_FTYPE_ALL_F32:
+      return "all F32";
+    case LLAMA_FTYPE_MOSTLY_F16:
+      return "mostly F16";
+    case LLAMA_FTYPE_MOSTLY_Q4_0:
+      return "mostly Q4_0";
+    case LLAMA_FTYPE_MOSTLY_Q4_1:
+      return "mostly Q4_1";
+    case LLAMA_FTYPE_MOSTLY_Q4_1_SOME_F16:
+      return "mostly Q4_1, some F16";
+    case LLAMA_FTYPE_MOSTLY_Q5_0:
+      return "mostly Q5_0";
+    case LLAMA_FTYPE_MOSTLY_Q5_1:
+      return "mostly Q5_1";
+    case LLAMA_FTYPE_MOSTLY_Q8_0:
+      return "mostly Q8_0";
+
+    // K-quants
+    case LLAMA_FTYPE_MOSTLY_Q2_K:
+      return "mostly Q2_K";
+    case LLAMA_FTYPE_MOSTLY_Q3_K_S:
+      return "mostly Q3_K - Small";
+    case LLAMA_FTYPE_MOSTLY_Q3_K_M:
+      return "mostly Q3_K - Medium";
+    case LLAMA_FTYPE_MOSTLY_Q3_K_L:
+      return "mostly Q3_K - Large";
+    case LLAMA_FTYPE_MOSTLY_Q4_K_S:
+      return "mostly Q4_K - Small";
+    case LLAMA_FTYPE_MOSTLY_Q4_K_M:
+      return "mostly Q4_K - Medium";
+    case LLAMA_FTYPE_MOSTLY_Q5_K_S:
+      return "mostly Q5_K - Small";
+    case LLAMA_FTYPE_MOSTLY_Q5_K_M:
+      return "mostly Q5_K - Medium";
+    case LLAMA_FTYPE_MOSTLY_Q6_K:
+      return "mostly Q6_K";
+
+    default:
+      return "unknown, may not work";
+  }
 }
 
 enum llama_fver {
@@ -1109,18 +1158,286 @@ static const char* llama_file_version_name(llama_fver version) {
 
 LLAMA_ATTRIBUTE_FORMAT(2, 3)
 static void llama_log_internal(ggml_log_level level, const char* format, ...);
-static void llama_log_callback_default(ggml_log_level level, const char* text,
-                                       void* user_data);
+static void llama_log_callback_default(ggml_log_level level, const char* text, void* user_data);
 
 #define LLAMA_LOG_INFO(...) llama_log_internal(GGML_LOG_LEVEL_INFO, __VA_ARGS__)
 #define LLAMA_LOG_WARN(...) llama_log_internal(GGML_LOG_LEVEL_WARN, __VA_ARGS__)
-#define LLAMA_LOG_ERROR(...) \
-  llama_log_internal(GGML_LOG_LEVEL_ERROR, __VA_ARGS__)
+#define LLAMA_LOG_ERROR(...) llama_log_internal(GGML_LOG_LEVEL_ERROR, __VA_ARGS__)
+
+static std::string llama_format_tensor_shape(const struct ggml_tensor* t) {
+  char buf[256];
+  snprintf(buf, sizeof(buf), "%5" PRId64, t->ne[0]);
+  for (int i = 1; i < GGML_MAX_DIMS; i++) {
+    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), ", %5" PRId64, t->ne[i]);
+  }
+  return buf;
+}
+
+struct llm_symbol {
+  using index = int;
+  index prev;
+  index next;
+  const char* text;
+  size_t n;
+};
+
+// BPE tokenizer
+// adapted from https://github.com/cmp-nct/ggllm.cpp [MIT License]
+// tried to simplify unicode stuff, so most likely does not work 100% correctly!
+
+// TODO: there are a lot of common parts between spm and bpe tokenizers, should be refactored and reused
+
+struct llm_bigram_bpe {
+  struct comparator {
+    bool operator()(const llm_bigram_bpe& l, const llm_bigram_bpe& r) const {
+      return l.rank > r.rank || (l.rank == r.rank && l.left > r.left);
+    }
+  };
+
+  using queue_storage = std::vector<llm_bigram_bpe>;
+  using queue = std::priority_queue<llm_bigram_bpe, queue_storage, comparator>;
+  llm_symbol::index left;
+  llm_symbol::index right;
+  std::string text;
+  int rank;
+  size_t size;
+};
+
+static llama_token llama_byte_to_token(const llama_vocab& vocab, uint8_t ch) {
+  char buf[7];
+  int result = snprintf(buf, sizeof(buf), "<0x%02X>", ch);
+  GGML_ASSERT(0 <= result && result < 7);
+  return vocab.token_to_id.at(buf);
+}
+
+struct llm_tokenizer_bpe {
+  llm_tokenizer_bpe(const llama_vocab& vocab) : vocab(vocab) {}
+
+  void tokenize(const std::string& text, std::vector<llama_vocab::id>& output) {
+    int final_prev_index = -1;
+    auto word_collection = bpe_gpt2_preprocess(text);
+
+    symbols_final.clear();
+
+    for (auto& word : word_collection) {
+      work_queue = llm_bigram_bpe::queue();
+      symbols.clear();
+
+      int index = 0;
+      size_t offset = 0;
+
+      while (offset < word.size()) {
+        llm_symbol sym;
+        size_t char_len = std::min(word.size() - offset, (size_t)::utf8_len(word[offset]));
+        sym.text = word.c_str() + offset;
+        sym.n = 1;
+        sym.n = char_len;
+        offset += sym.n;
+        sym.prev = index - 1;
+        sym.next = offset == word.size() ? -1 : index + 1;
+        index++;
+        symbols.emplace_back(sym);
+      }
+      for (size_t i = 1; i < symbols.size(); ++i) {
+        add_new_bigram(i - 1, i);
+      }
+
+      // build token(s)
+      while (!work_queue.empty()) {
+        auto bigram = work_queue.top();
+        work_queue.pop();
+
+        auto& left_symbol = symbols[bigram.left];
+        auto& right_symbol = symbols[bigram.right];
+
+        if (left_symbol.n == 0 || right_symbol.n == 0) {
+          continue;
+        }
+        std::string left_token = std::string(left_symbol.text, left_symbol.n);
+        std::string right_token = std::string(right_symbol.text, right_symbol.n);
+        if (left_token + right_token != bigram.text) {
+          continue;  // Skip this bigram if it's outdated
+        }
+
+        // merge the right sym into the left one
+        left_symbol.n += right_symbol.n;
+        right_symbol.n = 0;
+
+        // remove the right sym from the chain
+        left_symbol.next = right_symbol.next;
+        if (right_symbol.next >= 0) {
+          symbols[right_symbol.next].prev = bigram.left;
+        }
+
+        add_new_bigram(left_symbol.prev, bigram.left);  // left side of current symbol
+        add_new_bigram(bigram.left, left_symbol.next);  // right side of current symbol
+      }
+
+      // add the fnished tokens to the final list keeping correct order for next and prev
+      for (auto& sym : symbols) {
+        if (sym.n > 0) {
+          sym.prev = final_prev_index;
+          sym.next = -1;
+          if (final_prev_index != -1) {
+            symbols_final[final_prev_index].next = symbols_final.size();
+          }
+          symbols_final.emplace_back(sym);
+          final_prev_index = symbols_final.size() - 1;
+        }
+      }
+    }
+
+    symbols = symbols_final;
+
+    if (!symbols.empty()) {
+      for (int i = 0; i != -1; i = symbols[i].next) {
+        auto& symbol = symbols[i];
+        if (symbol.n == 0) {
+          continue;
+        }
+
+        const std::string str = std::string(symbol.text, symbol.n);
+        const auto token = vocab.token_to_id.find(str);
+
+        if (token == vocab.token_to_id.end()) {
+          for (auto j = str.begin(); j != str.end(); ++j) {
+            std::string byte_str(1, *j);
+            auto token_multibyte = vocab.token_to_id.find(byte_str);
+            if (token_multibyte == vocab.token_to_id.end()) {
+              try {
+                llama_token token_byte = llama_byte_to_token(vocab, *j);
+                output.push_back(token_byte);
+              } catch (const std::out_of_range& err) {
+                fprintf(stderr, "ERROR: byte not found in vocab: '%s'\n", byte_str.c_str());
+              }
+            } else {
+              output.push_back((*token_multibyte).second);
+            }
+          }
+        } else {
+          output.push_back((*token).second);
+        }
+      }
+    }
+  }
+
+ private:
+  void add_new_bigram(int left, int right) {
+    if (left == -1 || right == -1) {
+      return;
+    }
+
+    std::string left_token = std::string(symbols[left].text, symbols[left].n);
+    std::string right_token = std::string(symbols[right].text, symbols[right].n);
+
+    int rank_found = -1;
+
+    rank_found = vocab.find_bpe_rank(left_token, right_token);
+
+    if (rank_found < 0) {
+      return;
+    }
+
+    llm_bigram_bpe bigram;
+
+    bigram.left = left;
+    bigram.right = right;
+    bigram.text = left_token + right_token;
+    bigram.size = left_token.size() + right_token.size();
+    bigram.rank = rank_found;
+
+    work_queue.push(bigram);
+  }
+
+  // probably not 100% correct
+  static std::vector<std::string> bpe_gpt2_preprocess(const std::string& text) {
+    std::vector<std::string> words;
+
+    // ref: https://github.com/openai/gpt-2/blob/a74da5d99abaaba920de8131d64da2862a8f213b/src/encoder.py#L53
+    const std::string pattern =
+        R"('s|'t|'re|'ve|'m|'ll|'d| ?[[:alpha:]]+| ?[[:digit:]]+| ?[^\s[:alpha:][:digit:]]+|\s+(?!\S)|\s+)";
+    const std::regex re(pattern);
+
+    auto words_begin = std::sregex_iterator(text.begin(), text.end(), re);
+    auto words_end = std::sregex_iterator();
+    auto n_words = std::distance(words_begin, words_end);
+    words.reserve(n_words);
+    for (auto it = words_begin; it != words_end; ++it) {
+      words.push_back(it->str());
+    }
+    return words;
+  }
+
+  const llama_vocab& vocab;
+
+  std::vector<llm_symbol> symbols;
+  std::vector<llm_symbol> symbols_final;
+
+  llm_bigram_bpe::queue work_queue;
+};
+
+enum llm_tensor {
+  LLM_TENSOR_TOKEN_EMBD,
+  LLM_TENSOR_POS_EMBD,
+  LLM_TENSOR_OUTPUT,
+  LLM_TENSOR_OUTPUT_NORM,
+  LLM_TENSOR_ROPE_FREQS,
+  LLM_TENSOR_ATTN_Q,
+  LLM_TENSOR_ATTN_K,
+  LLM_TENSOR_ATTN_V,
+  LLM_TENSOR_ATTN_QKV,
+  LLM_TENSOR_ATTN_OUT,
+  LLM_TENSOR_ATTN_NORM,
+  LLM_TENSOR_ATTN_NORM_2,
+  LLM_TENSOR_ATTN_ROT_EMBD,
+  LLM_TENSOR_FFN_GATE,
+  LLM_TENSOR_FFN_DOWN,
+  LLM_TENSOR_FFN_UP,
+  LLM_TENSOR_FFN_NORM,
+};
+
+static std::map<llm_tensor, std::string> LLAMA_TENSOR_NAMES = {
+    {LLM_TENSOR_TOKEN_EMBD, "token_embd"},
+    {LLM_TENSOR_OUTPUT_NORM, "output_norm"},
+    {LLM_TENSOR_OUTPUT, "output"},
+    {LLM_TENSOR_ROPE_FREQS, "rope_freqs"},
+    {LLM_TENSOR_ATTN_NORM, "blk.%d.attn_norm"},
+    {LLM_TENSOR_ATTN_Q, "blk.%d.attn_q"},
+    {LLM_TENSOR_ATTN_K, "blk.%d.attn_k"},
+    {LLM_TENSOR_ATTN_V, "blk.%d.attn_v"},
+    {LLM_TENSOR_ATTN_OUT, "blk.%d.attn_output"},
+    {LLM_TENSOR_ATTN_ROT_EMBD, "blk.%d.attn_rot_embd"},
+    {LLM_TENSOR_FFN_NORM, "blk.%d.ffn_norm"},
+    {LLM_TENSOR_FFN_GATE, "blk.%d.ffn_gate"},
+    {LLM_TENSOR_FFN_DOWN, "blk.%d.ffn_down"},
+    {LLM_TENSOR_FFN_UP, "blk.%d.ffn_up"},
+};
 
 // =======================================================================
 // Main
 // =======================================================================
-const char* model_file_path = "models/llama-2-13b-chat.Q4_0.gguf";
+int main_gpu = 0;
+
+#ifdef GGML_USE_CUBLAS
+#define GGML_CUDA_NAME "CUDA"
+#define GGML_CUBLAS_NAME "cuBLAS"
+LLAMA_LOG_INFO("%s: using " GGML_CUDA_NAME " for GPU acceleration\n", __func__);
+ggml_cuda_set_main_device(main_gpu);
+#define LLAMA_BACKEND_OFFLOAD GGML_BACKEND_GPU
+#define LLAMA_BACKEND_OFFLOAD_SPLIT GGML_BACKEND_GPU_SPLIT
+#else
+#define LLAMA_BACKEND_OFFLOAD GGML_BACKEND_CPU
+#define LLAMA_BACKEND_OFFLOAD_SPLIT GGML_BACKEND_CPU
+#endif
+
+static const char* model_file_path = "models/llama-2-13b-chat.Q4_0.gguf";
+
+// params
+bool use_mmap = true;
+bool use_mlock = true;
+int n_gpu_layers = 0;
+float* tensor_split = nullptr;
+
 FILE* file = nullptr;
 uint32_t magic = 0;
 size_t offset = 0;
@@ -1129,8 +1446,14 @@ size_t ret = 0;
 bool ok = true;
 
 llama_model* model = new llama_model();
-struct gguf_context* ctx =
-    (struct gguf_context*)ggml_aligned_malloc(sizeof(struct gguf_context));
+llama_ftype ftype;
+std::string model_arch_name;
+int64_t n_elements = 0;
+size_t n_bytes = 0;
+size_t n_tensors = 0;
+size_t n_created = 0;
+
+struct gguf_context* gguf_ctx = (struct gguf_context*)ggml_aligned_malloc(sizeof(struct gguf_context));
 
 int main() {
   init_type_traits();
@@ -1153,53 +1476,49 @@ int main() {
     fread(&magic, 1, nitems, file);
     offset += nitems;
     printf("Magic number = 0x%x\n", magic);
-    printf("Current offset = %d; actual file offset = %d\n", offset,
-           ftell(file));
+    printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
     printf("\n");
   }
 
   // Read header
   {
     printf("== Read header ==\n");
-    ctx->header.magic = magic;
+    gguf_ctx->header.magic = magic;
 
     // version
-    nitems = sizeof(ctx->header.version);
-    fread(&ctx->header.version, 1, nitems, file);
+    nitems = sizeof(gguf_ctx->header.version);
+    fread(&gguf_ctx->header.version, 1, nitems, file);
     offset += nitems;
-    printf("header.version = %d\n", ctx->header.version);
-    printf("Current offset = %d; current file offset = %d\n", offset,
-           ftell(file));
+    printf("header.version = %d\n", gguf_ctx->header.version);
+    printf("Current offset = %d; current file offset = %d\n", offset, ftell(file));
     printf("\n");
 
     // n_tensors
-    nitems = sizeof(ctx->header.n_tensors);
-    fread(&ctx->header.n_tensors, 1, nitems, file);
+    nitems = sizeof(gguf_ctx->header.n_tensors);
+    fread(&gguf_ctx->header.n_tensors, 1, nitems, file);
     offset += nitems;
-    printf("header.n_tensors = %d\n", ctx->header.n_tensors);
-    printf("Current offset = %d; current file offset = %d\n", offset,
-           ftell(file));
+    printf("header.n_tensors = %d\n", gguf_ctx->header.n_tensors);
+    printf("Current offset = %d; current file offset = %d\n", offset, ftell(file));
     printf("\n");
 
     // n_kv
-    nitems = sizeof(ctx->header.n_kv);
-    fread(&ctx->header.n_kv, 1, nitems, file);
+    nitems = sizeof(gguf_ctx->header.n_kv);
+    fread(&gguf_ctx->header.n_kv, 1, nitems, file);
     offset += nitems;
-    printf("header.n_kv = %d\n", ctx->header.n_kv);
-    printf("Current offset = %d; actual file offset = %d\n", offset,
-           ftell(file));
+    printf("header.n_kv = %d\n", gguf_ctx->header.n_kv);
+    printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
     printf("\n");
   }
 
   // Read the kv pairs
   {
     printf("== Read the kv pairs ==\n");
-    size_t kv_buf_size = ctx->header.n_kv * sizeof(struct gguf_kv);
+    size_t kv_buf_size = gguf_ctx->header.n_kv * sizeof(struct gguf_kv);
     void* kv_ptr = malloc(kv_buf_size);
-    ctx->kv = (struct gguf_kv*)kv_ptr;
+    gguf_ctx->kv = (struct gguf_kv*)kv_ptr;
 
-    for (uint32_t i = 0; i < ctx->header.n_kv; ++i) {
-      struct gguf_kv* kv = &ctx->kv[i];
+    for (uint32_t i = 0; i < gguf_ctx->header.n_kv; ++i) {
+      struct gguf_kv* kv = &gguf_ctx->kv[i];
 
       nitems = sizeof(kv->key.n);
       ret = fread(&kv->key.n, 1, nitems, file);
@@ -1223,8 +1542,7 @@ int main() {
           fread(&kv->value.uint8, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.uint8);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_INT8: {
@@ -1232,8 +1550,7 @@ int main() {
           fread(&kv->value.int8, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.int8);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_UINT16: {
@@ -1241,8 +1558,7 @@ int main() {
           fread(&kv->value.uint16, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.uint16);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_INT16: {
@@ -1250,8 +1566,7 @@ int main() {
           fread(&kv->value.int16, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.int16);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_UINT32: {
@@ -1259,8 +1574,7 @@ int main() {
           fread(&kv->value.uint32, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.uint32);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_INT32: {
@@ -1268,8 +1582,7 @@ int main() {
           fread(&kv->value.int32, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.int32);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_FLOAT32: {
@@ -1277,8 +1590,7 @@ int main() {
           fread(&kv->value.float32, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.float32);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_UINT64: {
@@ -1286,8 +1598,7 @@ int main() {
           fread(&kv->value.uint64, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.uint64);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_INT64: {
@@ -1295,8 +1606,7 @@ int main() {
           fread(&kv->value.int64, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.int64);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_FLOAT64: {
@@ -1304,8 +1614,7 @@ int main() {
           fread(&kv->value.float64, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.float64);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_BOOL: {
@@ -1313,8 +1622,7 @@ int main() {
           fread(&kv->value.bool_, 1, nitems, file);
           offset += nitems;
           printf("Value = %d\n", kv->value.bool_);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_STRING: {
@@ -1328,8 +1636,7 @@ int main() {
           offset += nitems;
 
           printf("Value = %s\n", kv->value.str.data);
-          printf("Current offset = %d; actual file offset = %d\n", offset,
-                 ftell(file));
+          printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
           break;
         }
         case GGUF_TYPE_ARRAY: {
@@ -1358,8 +1665,7 @@ int main() {
               offset += nitems;
 
               printf("Value = %p\n", kv->value.arr.data);
-              printf("Current offset = %d; actual file offset = %d\n", offset,
-                     ftell(file));
+              printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
 
               break;
             }
@@ -1398,8 +1704,7 @@ int main() {
                 printf(", \"%s\"", arr[kv->value.arr.n - 1].data);
               }
               printf("]\n");
-              printf("Current offset = %d; actual file offset = %d\n", offset,
-                     ftell(file));
+              printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
 
               break;
             }
@@ -1423,10 +1728,9 @@ int main() {
   // Read the tensor infos
   {
     printf("Read the tensor info\n");
-    ctx->infos = (struct gguf_tensor_info*)malloc(
-        ctx->header.n_tensors * sizeof(struct gguf_tensor_info));
-    for (uint32_t i = 0; i < ctx->header.n_tensors; ++i) {
-      struct gguf_tensor_info* info = &ctx->infos[i];
+    gguf_ctx->infos = (struct gguf_tensor_info*)malloc(gguf_ctx->header.n_tensors * sizeof(struct gguf_tensor_info));
+    for (uint32_t i = 0; i < gguf_ctx->header.n_tensors; ++i) {
+      struct gguf_tensor_info* info = &gguf_ctx->infos[i];
 
       for (int j = 0; j < GGML_MAX_DIMS; ++j) {
         info->ne[j] = 1;
@@ -1469,77 +1773,75 @@ int main() {
       fread(&info->offset, 1, nitems, file);
       offset += nitems;
       printf("Tensor offset = %lld\n", info->offset);
-      printf("Current offset = %d; actual file offset = %d\n", offset,
-             ftell(file));
+      printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
       printf("\n");
     }
   }
 
   // Read alignment
-  ctx->alignment = GGUF_DEFAULT_ALIGNMENT;
-  int alignment_idx = -1;
-  const char* alignment_key = "general.alignment";
-  for (size_t i = 0; i < ctx->header.n_kv; i++) {
-    if (strcmp(alignment_key, ctx->kv[i].key.data) == 0) {
-      alignment_idx = i;
+  {
+    gguf_ctx->alignment = GGUF_DEFAULT_ALIGNMENT;
+    int alignment_idx = -1;
+    const char* alignment_key = "general.alignment";
+    for (size_t i = 0; i < gguf_ctx->header.n_kv; i++) {
+      if (strcmp(alignment_key, gguf_ctx->kv[i].key.data) == 0) {
+        alignment_idx = i;
+      }
+    }
+
+    if (alignment_idx != -1) {
+      GGML_ASSERT(gguf_ctx->kv[alignment_idx].type == GGUF_TYPE_UINT32);
+      gguf_ctx->alignment = gguf_ctx->kv[alignment_idx].value.uint32;
     }
   }
 
-  if (alignment_idx != -1) {
-    GGML_ASSERT(ctx->kv[alignment_idx].type == GGUF_TYPE_UINT32);
-    ctx->alignment = ctx->kv[alignment_idx].value.uint32;
-  }
-
-  // We require the data section to be aligned, so take into account any padding
+  // We require the data section to be aligned, so take into account any
+  // padding
   {
-    const size_t offset_pad = offset % ctx->alignment;
+    const size_t offset_pad = offset % gguf_ctx->alignment;
 
     if (offset_pad != 0) {
-      offset += ctx->alignment - offset_pad;
+      offset += gguf_ctx->alignment - offset_pad;
       fseek(file, offset, SEEK_SET);
-      printf("Current offset = %d; actual file offset = %d\n", offset,
-             ftell(file));
+      printf("Current offset = %d; actual file offset = %d\n", offset, ftell(file));
     }
-  }
 
-  // Store the current file offset - this is where the data section starts
-  ctx->offset = offset;
+    // Store the current file offset - this is where the data section starts
+    gguf_ctx->offset = offset;
+  }
 
   // Compute the total size of the data section, taking into account the
   // alignment
   {
-    ctx->size = 0;
-    for (uint32_t i = 0; i < ctx->header.n_tensors; ++i) {
-      struct gguf_tensor_info* info = &ctx->infos[i];
+    gguf_ctx->size = 0;
+    for (uint32_t i = 0; i < gguf_ctx->header.n_tensors; ++i) {
+      struct gguf_tensor_info* info = &gguf_ctx->infos[i];
 
-      const int64_t element_count = (int64_t)info->ne[0] *
-                                    (int64_t)info->ne[1] *
-                                    (int64_t)info->ne[2] * (int64_t)info->ne[3];
+      const int64_t element_count =
+          (int64_t)info->ne[0] * (int64_t)info->ne[1] * (int64_t)info->ne[2] * (int64_t)info->ne[3];
 
       if (element_count % type_traits[info->type].blck_size != 0) {
         fprintf(stderr,
                 "%s: tensor '%s' number of elements %lld is not a multiple of "
                 "block size (%d)\n",
-                __func__, info->name.data, element_count,
-                type_traits[info->type].blck_size);
+                __func__, info->name.data, element_count, type_traits[info->type].blck_size);
         fclose(file);
-        gguf_free(ctx);
+        gguf_free(gguf_ctx);
         return 1;
       }
 
-      const size_t size_cur =
-          (element_count * type_traits[info->type].type_size) /
-          type_traits[info->type].blck_size;
-      ctx->size += GGML_PAD(size_cur, ctx->alignment);
+      const size_t size_cur = (element_count * type_traits[info->type].type_size) / type_traits[info->type].blck_size;
+      gguf_ctx->size += GGML_PAD(size_cur, gguf_ctx->alignment);
     }
   }
 
   // Load the tensor data only if requested
   {
-    // If the provided gguf_context is no_alloc, then we create "empty" tensors
-    // and do not read the binary blob otherwise, we load the binary blob into
-    // the created ggml_context as well, and point the "data" members of the
-    // ggml_tensor structs to the appropriate locations in the binary blob
+    // If the provided gguf_context is no_alloc, then we create "empty"
+    // tensors and do not read the binary blob otherwise, we load the binary
+    // blob into the created ggml_context as well, and point the "data"
+    // members of the ggml_tensor structs to the appropriate locations in the
+    // binary blob
 
     struct gguf_init_params params = {
         .no_alloc = true,
@@ -1548,11 +1850,8 @@ int main() {
 
     // compute the exact size needed for the new ggml_context
     const size_t mem_size =
-        params.no_alloc
-            ? (ctx->header.n_tensors) * (GGML_OBJECT_SIZE + GGML_TENSOR_SIZE)
-            : (ctx->header.n_tensors + 1) *
-                      (GGML_OBJECT_SIZE + GGML_TENSOR_SIZE) +
-                  ctx->size;
+        params.no_alloc ? (gguf_ctx->header.n_tensors) * (GGML_OBJECT_SIZE + GGML_TENSOR_SIZE)
+                        : (gguf_ctx->header.n_tensors + 1) * (GGML_OBJECT_SIZE + GGML_TENSOR_SIZE) + gguf_ctx->size;
 
     struct ggml_init_params pdata = {
         .mem_size = mem_size,
@@ -1563,57 +1862,722 @@ int main() {
     ggml_context* tmp_ctx = ggml_init(pdata);
     *params.ctx = tmp_ctx;
 
-    struct ggml_context* ctx_data = *params.ctx;
-
-    struct ggml_tensor* data = NULL;
-
-    // ggml_set_no_alloc(ctx_data, true);
-    ctx_data->no_alloc = true;
+    // ggml_set_no_alloc(ctx_meta, true);
+    ctx_meta->no_alloc = true;
 
     // create the tensors
-    for (uint32_t i = 0; i < ctx->header.n_tensors; ++i) {
+    for (uint32_t i = 0; i < gguf_ctx->header.n_tensors; ++i) {
       const int64_t ne[GGML_MAX_DIMS] = {
-          (int64_t)ctx->infos[i].ne[0],
-          (int64_t)ctx->infos[i].ne[1],
-          (int64_t)ctx->infos[i].ne[2],
-          (int64_t)ctx->infos[i].ne[3],
+          (int64_t)gguf_ctx->infos[i].ne[0],
+          (int64_t)gguf_ctx->infos[i].ne[1],
+          (int64_t)gguf_ctx->infos[i].ne[2],
+          (int64_t)gguf_ctx->infos[i].ne[3],
       };
 
-      struct ggml_tensor* cur = ggml_new_tensor(ctx_data, ctx->infos[i].type,
-                                                ctx->infos[i].n_dims, ne);
-
-      ok = ok && cur != NULL;
-
-      ggml_set_name(cur, ctx->infos[i].name.data);
-
-      if (!ok) {
-        break;
-      }
-
-      // point the data member to the appropriate location in the binary blob
-      // using the tensor infos
-      if (!params.no_alloc) {
-        // cur->data = (char *) data->data + ctx->infos[i].offset - ctx->offset;
-        // // offset from start of file
-        cur->data =
-            (char*)data->data + ctx->infos[i].offset;  // offset from data
+      struct ggml_tensor* cur = ggml_new_tensor(ctx_meta, gguf_ctx->infos[i].type, gguf_ctx->infos[i].n_dims, ne);
+      if (cur != nullptr) {
+        ggml_set_name(cur, gguf_ctx->infos[i].name.data);
+      } else {
+        throw std::runtime_error(format("Could not create tensor %s", gguf_ctx->infos[i].name.data));
       }
     }
   }
 
-  // Logging
-  int64_t n_elements = 0;
-  size_t n_bytes = 0;
-  for (int i = 0; i < ctx->header.n_tensors; i++) {
-    const char* name = ctx->infos[i].name.data;
-    struct ggml_tensor* t = ggml_get_tensor(ctx_meta, name);
-    n_elements += (t->ne[0] * t->ne[1] * t->ne[2] * t->ne[3]);
-    n_bytes += ggml_nbytes(t);
+  // Print metadata
+  {
+    for (int i = 0; i < gguf_ctx->header.n_tensors; i++) {
+      const char* name = gguf_ctx->infos[i].name.data;
+      struct ggml_tensor* t = ggml_get_tensor(ctx_meta, name);
+      n_elements += (t->ne[0] * t->ne[1] * t->ne[2] * t->ne[3]);
+      n_bytes += ggml_nbytes(t);
+    }
+
+    LLAMA_LOG_INFO(
+        "%s: loaded meta data with %d key-value pairs and %d tensors from %s "
+        "(version %s)\n\n",
+        __func__, gguf_ctx->header.n_kv, gguf_ctx->header.n_tensors, model_file_path,
+        llama_file_version_name((llama_fver)gguf_ctx->header.version));
+
+    {
+      std::map<enum ggml_type, uint32_t> n_type;
+
+      uint32_t n_type_max = 0;
+      enum ggml_type type_max = GGML_TYPE_F32;
+
+      for (int i = 0; i < gguf_ctx->header.n_tensors; i++) {
+        const char* name = gguf_ctx->infos[i].name.data;
+        struct ggml_tensor* tensor = ggml_get_tensor(ctx_meta, name);
+
+        n_type[tensor->type]++;
+
+        if (n_type_max < n_type[tensor->type]) {
+          n_type_max = n_type[tensor->type];
+          type_max = tensor->type;
+        }
+
+        LLAMA_LOG_INFO("%s: - tensor %4d: %32s %-8s [ %s ]\n", __func__, i, name, type_traits[tensor->type].type_name,
+                       llama_format_tensor_shape(tensor).c_str());
+      }
+
+      printf("\n");
+
+      switch (type_max) {
+        case GGML_TYPE_F32:
+          ftype = LLAMA_FTYPE_ALL_F32;
+          break;
+        case GGML_TYPE_F16:
+          ftype = LLAMA_FTYPE_MOSTLY_F16;
+          break;
+        case GGML_TYPE_Q4_0:
+          ftype = LLAMA_FTYPE_MOSTLY_Q4_0;
+          break;
+        case GGML_TYPE_Q4_1:
+          ftype = LLAMA_FTYPE_MOSTLY_Q4_1;
+          break;
+        case GGML_TYPE_Q5_0:
+          ftype = LLAMA_FTYPE_MOSTLY_Q5_0;
+          break;
+        case GGML_TYPE_Q5_1:
+          ftype = LLAMA_FTYPE_MOSTLY_Q5_1;
+          break;
+        case GGML_TYPE_Q8_0:
+          ftype = LLAMA_FTYPE_MOSTLY_Q8_0;
+          break;
+        case GGML_TYPE_Q2_K:
+          ftype = LLAMA_FTYPE_MOSTLY_Q2_K;
+          break;
+        case GGML_TYPE_Q3_K:
+          ftype = LLAMA_FTYPE_MOSTLY_Q3_K_M;
+          break;
+        case GGML_TYPE_Q4_K:
+          ftype = LLAMA_FTYPE_MOSTLY_Q4_K_M;
+          break;
+        case GGML_TYPE_Q5_K:
+          ftype = LLAMA_FTYPE_MOSTLY_Q5_K_M;
+          break;
+        case GGML_TYPE_Q6_K:
+          ftype = LLAMA_FTYPE_MOSTLY_Q6_K;
+          break;
+        default: {
+          LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, type_traits[type_max].type_name);
+          ftype = LLAMA_FTYPE_ALL_F32;
+
+        } break;
+      }
+
+      // this is a way to mark that we have "guessed" the file type
+      ftype = (llama_ftype)(ftype | LLAMA_FTYPE_GUESSED);
+      {
+        const int kid = gguf_find_key(gguf_ctx, "general.file_type");
+        if (kid >= 0) {
+          GGML_ASSERT(gguf_ctx->kv[kid].type == GGUF_TYPE_UINT32);
+          ftype = (llama_ftype)gguf_ctx->kv[kid].value.uint32;
+        }
+      }
+
+      for (uint64_t i = 0; i < gguf_ctx->header.n_kv; i++) {
+        const char* name = gguf_ctx->kv[i].key.data;
+        const enum gguf_type type = gguf_ctx->kv[i].type;
+
+        LLAMA_LOG_INFO("%s: - kv %3d: %42s %-8s\n", __func__, i, name, GGUF_TYPE_NAME[type]);
+      }
+
+      printf("\n");
+
+      // print type counts
+      for (auto& kv : n_type) {
+        if (kv.second == 0) {
+          continue;
+        }
+
+        LLAMA_LOG_INFO("%s: - type %4s: %4d tensors\n", __func__, type_traits[kv.first].type_name, kv.second);
+      }
+    }
   }
 
-  LLAMA_LOG_INFO(
-      "%s: loaded meta data with %d key-value pairs and %d tensors from %s "
-      "(version %s)\n",
-      __func__, ctx->header.n_kv, ctx->header.n_tensors, model_file_path,
-      llama_file_version_name((llama_fver)ctx->header.version));
+  // Save number of tensors
+  n_tensors = gguf_ctx->header.n_tensors;
+  printf("\n");
+
+  // Update model object
+  {
+    // Model name
+    {
+      const std::string model_name_key = LLM_KV_NAMES[LLM_KV_GENERAL_NAME];
+      const int kid = gguf_find_key(gguf_ctx, model_name_key.c_str());
+      model->name = gguf_ctx->kv[kid].value.str.data;
+      LLAMA_LOG_INFO("%s: - %42s %-20s\n", __func__, "model->name:", model->name.c_str());
+    }
+
+    // Model arch
+    {
+      const std::string arch_key = LLM_KV_NAMES[LLM_KV_GENERAL_ARCHITECTURE];
+      const int kid = gguf_find_key(gguf_ctx, arch_key.c_str());
+      const std::string arch_value = gguf_ctx->kv[kid].value.str.data;
+      model->arch = LLM_ARCH_NAMES[arch_value];
+      model_arch_name = arch_value;
+      LLAMA_LOG_INFO("%s: - %42s %-20s\n", __func__, "model->arch:", arch_value.c_str());
+    }
+
+    // Model hyperparameters
+    {
+      bool vocab_only = false;
+      auto& hparams = model->hparams;
+
+      hparams.vocab_only = vocab_only;
+      LLAMA_LOG_INFO("%s: - %42s %-20s\n", __func__,
+                     "model->hparams.vocab_only:", hparams.vocab_only ? "true" : "false");
+
+      // get hparams kv
+      std::string key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_LIST], model_arch_name);
+      int kid = gguf_find_key(gguf_ctx, key.c_str());
+      hparams.n_vocab = gguf_ctx->kv[kid].value.arr.n;
+      LLAMA_LOG_INFO("%s: - %42s %-20ld\n", __func__, "model->hparams.n_vocab:", hparams.n_vocab);
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_CONTEXT_LENGTH], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      hparams.n_ctx_train = gguf_ctx->kv[kid].value.uint32;
+      LLAMA_LOG_INFO("%s: - %42s %-20ld\n", __func__, "model->hparams.n_ctx_train:", hparams.n_ctx_train);
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_EMBEDDING_LENGTH], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      hparams.n_embd = gguf_ctx->kv[kid].value.uint32;
+      LLAMA_LOG_INFO("%s: - %42s %-20ld\n", __func__, "model->hparams.n_embd:", hparams.n_embd);
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_FEED_FORWARD_LENGTH], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      hparams.n_ff = gguf_ctx->kv[kid].value.uint32;
+      LLAMA_LOG_INFO("%s: - %42s %-20ld\n", __func__, "model->hparams.n_ff:", hparams.n_ff);
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_ATTENTION_HEAD_COUNT], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      hparams.n_head = gguf_ctx->kv[kid].value.uint32;
+      LLAMA_LOG_INFO("%s: - %42s %-20ld\n", __func__, "model->hparams.n_head:", hparams.n_head);
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_BLOCK_COUNT], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      hparams.n_layer = gguf_ctx->kv[kid].value.uint32;
+      LLAMA_LOG_INFO("%s: - %42s %-20ld\n", __func__, "model->hparams.n_layer:", hparams.n_layer);
+
+      // n_head_kv is optional, default to n_head
+      hparams.n_head_kv = hparams.n_head;
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_ATTENTION_HEAD_COUNT_KV], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid > 0) {
+        hparams.n_head_kv = gguf_ctx->kv[kid].value.uint32;
+      }
+      LLAMA_LOG_INFO("%s: - %42s %-20ld\n", __func__, "model->hparams.n_head_kv:", hparams.n_head_kv);
+
+      // rope_freq_base (optional)
+      hparams.rope_freq_base_train = 10000.0f;
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_ROPE_FREQ_BASE], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid > 0) {
+        hparams.rope_freq_base_train = gguf_ctx->kv[kid].value.float32;
+      }
+      LLAMA_LOG_INFO("%s: - %42s %-20.3lf\n", __func__,
+                     "model->hparams.rope_freq_base_train:", hparams.rope_freq_base_train);
+
+      // rope_freq_scale (inverse of the kv) is optional
+      float ropescale = 1.0f;
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_ROPE_SCALE_LINEAR], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid > 0) {
+        ropescale = gguf_ctx->kv[kid].value.float32;
+      }
+      hparams.rope_freq_scale_train = 1.0f / ropescale;
+      LLAMA_LOG_INFO("%s: - %42s %-20.3lf\n", __func__,
+                     "model->hparams.rope_freq_scale_train:", hparams.rope_freq_scale_train);
+
+      // For LLM_ARCH_LLAMA only (We already known our model arch is llama)
+      {
+        key = build_llm_key(LLM_KV_NAMES[LLM_KV_ATTENTION_LAYERNORM_RMS_EPS], model_arch_name);
+        kid = gguf_find_key(gguf_ctx, key.c_str());
+        hparams.f_norm_rms_eps = gguf_ctx->kv[kid].value.float32;
+        LLAMA_LOG_INFO("%s: - %42s %-20.3lf\n", __func__, "model->hparams.f_norm_rms_eps:", hparams.f_norm_rms_eps);
+
+        // Model type
+        switch (hparams.n_layer) {
+          case 26:
+            model->type = e_model::MODEL_3B;
+            break;
+          case 32:
+            model->type = e_model::MODEL_7B;
+            break;
+          case 40:
+            model->type = e_model::MODEL_13B;
+            break;
+          case 48:
+            model->type = e_model::MODEL_34B;
+            break;
+          case 60:
+            model->type = e_model::MODEL_30B;
+            break;
+          case 80:
+            model->type = hparams.n_head == hparams.n_head_kv ? e_model::MODEL_65B : e_model::MODEL_70B;
+            break;
+          default:
+            model->type = e_model::MODEL_UNKNOWN;
+        }
+
+        LLAMA_LOG_INFO("%s: - %42s %-20d\n", __func__, "model->type:", model->type);
+      }
+    }
+
+    // Model file type
+    {
+      model->ftype = ftype;
+      LLAMA_LOG_INFO("%s: - %42s %-20d\n", __func__, "model->ftype:", model->ftype);
+    }
+
+    // Model vocab
+    {
+      // GGUF_GET_KEY(gguf_ctx, tokenizer_name, gguf_get_val_str, GGUF_TYPE_STRING, true, kv(LLM_KV_TOKENIZER_MODEL));
+      std::string key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_MODEL], model_arch_name);
+      int kid = gguf_find_key(gguf_ctx, key.c_str());
+      std::string tokenizer_name = gguf_ctx->kv[kid].value.str.data;
+
+      // It should be "llama"
+      if (tokenizer_name != "llama") {
+        throw std::runtime_error("The tokenizer name is NOT \"llama\".");
+      }
+
+      model->vocab.type = LLAMA_VOCAB_TYPE_SPM;
+
+      // Default special tokens
+      model->vocab.special_bos_id = 1;
+      model->vocab.special_eos_id = 2;
+      model->vocab.special_unk_id = 0;
+      model->vocab.special_sep_id = -1;
+      model->vocab.special_pad_id = -1;
+
+      model->vocab.id_to_token.resize(model->hparams.n_vocab);
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_LIST], model_arch_name);
+      const int token_idx = gguf_find_key(gguf_ctx, key.c_str());
+      if (token_idx == -1) {
+        throw std::runtime_error("cannot find tokenizer vocab in model file\n");
+      }
+
+      const float* scores = nullptr;
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_SCORES], model_arch_name);
+      const int scores_idx = gguf_find_key(gguf_ctx, key.c_str());
+      if (scores_idx == -1) {
+        throw std::runtime_error("cannot find tokenizer scores in model file\n");
+      }
+      scores = (const float*)gguf_ctx->kv[scores_idx].value.arr.data;
+
+      const int* toktypes = nullptr;
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_TOKEN_TYPE], model_arch_name);
+      const int toktypes_idx = gguf_find_key(gguf_ctx, key.c_str());
+      if (toktypes_idx == -1) {
+        throw std::runtime_error("cannot find tokenizer token types in model file\n");
+      }
+      toktypes = (const int*)gguf_ctx->kv[toktypes_idx].value.arr.data;
+
+      for (uint32_t i = 0; i < model->hparams.n_vocab; i++) {
+        std::string word = ((struct gguf_str*)gguf_ctx->kv[token_idx].value.arr.data)[i].data;
+
+        model->vocab.token_to_id[word] = i;
+        model->vocab.id_to_token[i].text = std::move(word);
+        model->vocab.id_to_token[i].score = scores ? scores[i] : 0.0f;
+        model->vocab.id_to_token[i].type = toktypes ? (llama_token_type)toktypes[i] : LLAMA_TOKEN_TYPE_NORMAL;
+      }
+
+      // Determine the newline token: LLaMA "<0x0A>" == 10 == '\n', Falcon 193 == '\n'
+      if (model->vocab.type == LLAMA_VOCAB_TYPE_SPM) {
+        char buf[7];
+        int result = snprintf(buf, sizeof(buf), "<0x%02X>", '\n');
+        GGML_ASSERT(0 <= result && result < 7);
+        model->vocab.linefeed_id = model->vocab.token_to_id.at(buf);
+      } else {
+        std::vector<llama_vocab::id> output;
+        llm_tokenizer_bpe tokenizer(model->vocab);
+        tokenizer.tokenize("\n", output);
+        model->vocab.linefeed_id = output[0];
+      }
+
+      // Special tokens
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_BOS_ID], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid != -1) {
+        model->vocab.special_bos_id = gguf_ctx->kv[kid].value.uint32;
+      }
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_EOS_ID], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid != -1) {
+        model->vocab.special_eos_id = gguf_ctx->kv[kid].value.uint32;
+      }
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_UNK_ID], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid != -1) {
+        model->vocab.special_unk_id = gguf_ctx->kv[kid].value.uint32;
+      }
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_SEP_ID], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid != -1) {
+        model->vocab.special_sep_id = gguf_ctx->kv[kid].value.uint32;
+      }
+
+      key = build_llm_key(LLM_KV_NAMES[LLM_KV_TOKENIZER_PAD_ID], model_arch_name);
+      kid = gguf_find_key(gguf_ctx, key.c_str());
+      if (kid != -1) {
+        model->vocab.special_pad_id = gguf_ctx->kv[kid].value.uint32;
+      }
+    }
+  }
+
+  printf("\n");
+
+  // Print model metadata
+  {
+    const auto& hparams = model->hparams;
+    const auto& vocab = model->vocab;
+    const llama_fver fver = (llama_fver)gguf_ctx->header.version;
+
+    // hparams
+    LLAMA_LOG_INFO("%s: format           = %s\n", __func__, llama_file_version_name(fver));
+    LLAMA_LOG_INFO("%s: arch             = %s\n", __func__, model_arch_name.c_str());
+    LLAMA_LOG_INFO("%s: vocab type       = %s\n", __func__,
+                   vocab.type == LLAMA_VOCAB_TYPE_SPM ? "SPM" : "BPE");  // TODO: fix
+    LLAMA_LOG_INFO("%s: n_vocab          = %u\n", __func__, hparams.n_vocab);
+    LLAMA_LOG_INFO("%s: n_merges         = %u\n", __func__, (int)vocab.bpe_ranks.size());
+    LLAMA_LOG_INFO("%s: n_ctx_train      = %u\n", __func__, hparams.n_ctx_train);
+    LLAMA_LOG_INFO("%s: n_embd           = %u\n", __func__, hparams.n_embd);
+    LLAMA_LOG_INFO("%s: n_head           = %u\n", __func__, hparams.n_head);
+    LLAMA_LOG_INFO("%s: n_head_kv        = %u\n", __func__, hparams.n_head_kv);
+    LLAMA_LOG_INFO("%s: n_layer          = %u\n", __func__, hparams.n_layer);
+    LLAMA_LOG_INFO("%s: n_rot            = %u\n", __func__, hparams.n_rot);  // a.k.a. n_embd_head, n_head_dim
+    LLAMA_LOG_INFO("%s: n_gqa            = %u\n", __func__, hparams.n_gqa());
+    LLAMA_LOG_INFO("%s: f_norm_eps       = %.1e\n", __func__, hparams.f_norm_eps);
+    LLAMA_LOG_INFO("%s: f_norm_rms_eps   = %.1e\n", __func__, hparams.f_norm_rms_eps);
+    LLAMA_LOG_INFO("%s: n_ff             = %u\n", __func__, hparams.n_ff);
+    LLAMA_LOG_INFO("%s: freq_base_train  = %.1f\n", __func__, hparams.rope_freq_base_train);
+    LLAMA_LOG_INFO("%s: freq_scale_train = %g\n", __func__, hparams.rope_freq_scale_train);
+    LLAMA_LOG_INFO("%s: model type       = %s\n", __func__, llama_model_type_name(model->type));
+    LLAMA_LOG_INFO("%s: model ftype      = %s\n", __func__, llama_model_ftype_name(model->ftype).c_str());
+    LLAMA_LOG_INFO("%s: model params     = %.2f B\n", __func__, n_elements * 1e-9);
+    if (n_bytes < GB) {
+      LLAMA_LOG_INFO("%s: model size       = %.2f MiB (%.2f BPW) \n", __func__, n_bytes / 1024.0 / 1024.0,
+                     n_bytes * 8.0 / n_elements);
+    } else {
+      LLAMA_LOG_INFO("%s: model size       = %.2f GiB (%.2f BPW) \n", __func__, n_bytes / 1024.0 / 1024.0 / 1024.0,
+                     n_bytes * 8.0 / n_elements);
+    }
+
+    // general kv
+    LLAMA_LOG_INFO("%s: general.name     = %s\n", __func__, model->name.c_str());
+
+    // special tokens
+    if (vocab.special_bos_id != -1) {
+      LLAMA_LOG_INFO("%s: BOS token = %d '%s'\n", __func__, vocab.special_bos_id,
+                     vocab.id_to_token[vocab.special_bos_id].text.c_str());
+    }
+    if (vocab.special_eos_id != -1) {
+      LLAMA_LOG_INFO("%s: EOS token = %d '%s'\n", __func__, vocab.special_eos_id,
+                     vocab.id_to_token[vocab.special_eos_id].text.c_str());
+    }
+    if (vocab.special_unk_id != -1) {
+      LLAMA_LOG_INFO("%s: UNK token = %d '%s'\n", __func__, vocab.special_unk_id,
+                     vocab.id_to_token[vocab.special_unk_id].text.c_str());
+    }
+    if (vocab.special_sep_id != -1) {
+      LLAMA_LOG_INFO("%s: SEP token = %d '%s'\n", __func__, vocab.special_sep_id,
+                     vocab.id_to_token[vocab.special_sep_id].text.c_str());
+    }
+    if (vocab.special_pad_id != -1) {
+      LLAMA_LOG_INFO("%s: PAD token = %d '%s'\n", __func__, vocab.special_pad_id,
+                     vocab.id_to_token[vocab.special_pad_id].text.c_str());
+    }
+    if (vocab.linefeed_id != -1) {
+      LLAMA_LOG_INFO("%s: LF token  = %d '%s'\n", __func__, vocab.linefeed_id,
+                     vocab.id_to_token[vocab.linefeed_id].text.c_str());
+    }
+  }
+
+  // Check model vocab integrity
+  if (model->hparams.n_vocab != model->vocab.id_to_token.size()) {
+    throw std::runtime_error("Model vocab size mismatch");
+  }
+
+  printf("\n");
+
+  // Load tensors
+  size_t ctx_size = 0;
+  size_t mmapped_size = 0;
+  {
+    for (int i = 0; i < gguf_ctx->header.n_tensors; i++) {
+      struct ggml_tensor* tensor = ggml_get_tensor(ctx_meta, gguf_ctx->infos[i].name.data);
+      ctx_size += sizeof(struct ggml_tensor) + GGML_OBJECT_SIZE;
+      mmapped_size += GGML_PAD(ggml_nbytes(tensor), GGML_MEM_ALIGN);
+    }
+    LLAMA_LOG_INFO("%s: ggml ctx size = %7.2f MB\n", __func__, ctx_size / 1024.0 / 1024.0);
+
+    // Create the ggml context
+    {
+      model->buf.resize(ctx_size);
+      if (use_mlock) {
+        model->mlock_buf.init(model->buf.data);
+        model->mlock_buf.grow_to(model->buf.size);
+      }
+
+      struct ggml_init_params params = {
+          /*.mem_size   =*/model->buf.size,
+          /*.mem_buffer =*/model->buf.data,
+          /*.no_alloc   =*/use_mmap,
+      };
+
+      model->ctx = ggml_init(params);
+      if (!model->ctx) {
+        throw std::runtime_error(format("ggml_init() failed"));
+      }
+    }
+
+    // Prepare memory for the weights
+    size_t vram_weights = 0;
+    {
+      const int64_t n_embd = model->hparams.n_embd;
+      const int64_t n_embd_gqa = model->hparams.n_embd_gqa();
+      const int64_t n_layer = model->hparams.n_layer;
+      const int64_t n_vocab = model->hparams.n_vocab;
+
+      // For LLM_ARCH_LLAMA only
+      {
+        std::string tensor_name = LLAMA_TENSOR_NAMES[LLM_TENSOR_TOKEN_EMBD] + "." + "weight";
+        struct ggml_tensor* cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+        model->tok_embeddings = create_tensor_for(model->ctx, cur, GGML_BACKEND_CPU);
+        n_created++;
+
+        // output
+        {
+          ggml_backend backend_norm;
+          ggml_backend backend_output;
+
+          if (n_gpu_layers > int(n_layer)) {
+            // norm is not performance relevant on its own but keeping it in VRAM reduces data copying
+            // on Windows however this is detrimental unless everything is on the GPU
+            backend_norm = LLAMA_BACKEND_OFFLOAD;
+            backend_output = LLAMA_BACKEND_OFFLOAD_SPLIT;
+          } else {
+            backend_norm = GGML_BACKEND_CPU;
+            backend_output = GGML_BACKEND_CPU;
+          }
+
+          tensor_name = LLAMA_TENSOR_NAMES[LLM_TENSOR_OUTPUT_NORM] + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          model->output_norm = create_tensor_for(model->ctx, cur, backend_norm);
+          n_created++;
+
+          tensor_name = LLAMA_TENSOR_NAMES[LLM_TENSOR_OUTPUT] + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          model->output = create_tensor_for(model->ctx, cur, backend_output);
+          n_created++;
+
+          if (backend_norm == GGML_BACKEND_GPU) {
+            vram_weights += ggml_nbytes(model->output_norm);
+          }
+          if (backend_output == GGML_BACKEND_GPU_SPLIT) {
+            vram_weights += ggml_nbytes(model->output);
+          }
+        }
+
+        const uint32_t n_ff = model->hparams.n_ff;
+        const int i_gpu_start = n_layer - n_gpu_layers;
+        model->layers.resize(n_layer);
+
+        for (uint32_t i = 0; i < n_layer; ++i) {
+          const ggml_backend backend = int(i) < i_gpu_start ? GGML_BACKEND_CPU : LLAMA_BACKEND_OFFLOAD;
+          const ggml_backend backend_split = int(i) < i_gpu_start ? GGML_BACKEND_CPU : LLAMA_BACKEND_OFFLOAD_SPLIT;
+
+          auto& layer = model->layers[i];
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_ATTN_NORM].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.attn_norm = create_tensor_for(model->ctx, cur, backend);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_ATTN_Q].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.wq = create_tensor_for(model->ctx, cur, backend_split);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_ATTN_K].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.wk = create_tensor_for(model->ctx, cur, backend_split);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_ATTN_V].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.wv = create_tensor_for(model->ctx, cur, backend_split);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_ATTN_OUT].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.wo = create_tensor_for(model->ctx, cur, backend_split);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_FFN_NORM].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.ffn_norm = create_tensor_for(model->ctx, cur, backend);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_FFN_GATE].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.w1 = create_tensor_for(model->ctx, cur, backend_split);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_FFN_DOWN].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.w2 = create_tensor_for(model->ctx, cur, backend_split);
+          n_created++;
+
+          tensor_name = format(LLAMA_TENSOR_NAMES[LLM_TENSOR_FFN_UP].c_str(), i) + "." + "weight";
+          cur = ggml_get_tensor(ctx_meta, tensor_name.c_str());
+          layer.w3 = create_tensor_for(model->ctx, cur, backend_split);
+          n_created++;
+
+          if (backend == GGML_BACKEND_GPU) {
+            vram_weights += ggml_nbytes(layer.attn_norm) + ggml_nbytes(layer.wq) + ggml_nbytes(layer.wk) +
+                            ggml_nbytes(layer.wv) + ggml_nbytes(layer.wo) + ggml_nbytes(layer.ffn_norm) +
+                            ggml_nbytes(layer.w1) + ggml_nbytes(layer.w2) + ggml_nbytes(layer.w3);
+          }
+        }
+      }
+    }
+
+    // Integrity check
+    if (n_created != n_tensors) {
+      throw std::runtime_error(
+          format("%s: wrong number of tensors; expected %d, got %d", __func__, n_tensors, n_created));
+    }
+
+    // Print memory requirements
+    {
+      // this is the total memory required to run the inference
+      size_t mem_required = ctx_size + mmapped_size - vram_weights;  // weights in VRAM not in memory
+
+      LLAMA_LOG_INFO("%s: mem required  = %7.2f MB\n", __func__, mem_required / 1024.0 / 1024.0);
+
+#if defined(GGML_USE_CUBLAS) || defined(GGML_USE_CLBLAST)
+      const int n_gpu = std::min(n_gpu_layers, int(hparams.n_layer));
+
+      LLAMA_LOG_INFO("%s: offloading %d repeating layers to GPU\n", __func__, n_gpu);
+      if (n_gpu_layers > (int)hparams.n_layer) {
+        LLAMA_LOG_INFO("%s: offloading non-repeating layers to GPU\n", __func__);
+      }
+
+#ifdef GGML_USE_CUBLAS
+      const int max_backend_supported_layers = hparams.n_layer + 3;
+      const int max_offloadable_layers = hparams.n_layer + 3;
+#elif defined(GGML_USE_CLBLAST)
+      const int max_backend_supported_layers = hparams.n_layer + 1;
+      const int max_offloadable_layers = hparams.n_layer + 1;
+#endif  // GGML_USE_CUBLAS
+
+      LLAMA_LOG_INFO("%s: offloaded %d/%d layers to GPU\n", __func__, std::min(n_gpu_layers, max_offloadable_layers),
+                     max_backend_supported_layers);
+      LLAMA_LOG_INFO("%s: VRAM used: %.2f MB\n", __func__, vram_weights / 1024.0 / 1024.0);
+#else
+      (void)n_gpu_layers;
+#endif  // defined(GGML_USE_CUBLAS) || defined(GGML_USE_CLBLAST)
+    }
+
+    // populate `tensors_by_name`
+    for (int i = 0; i < n_tensors; ++i) {
+      struct ggml_tensor* cur = ggml_get_tensor(model->ctx, gguf_ctx->infos[i].name.data);
+      model->tensors_by_name.emplace_back(cur->name, cur);
+    }
+
+    (void)tensor_split;
+#ifdef GGML_USE_CUBLAS
+    { ggml_cuda_set_tensor_split(tensor_split); }
+#endif
+
+    // Load tensor data
+    {
+      printf("Loading model\n");
+      size_t size_data = 0;
+      size_t size_lock = 0;
+      size_t size_pref = 0;  // prefetch
+
+      for (int i = 0; i < n_tensors; i++) {
+        struct ggml_tensor* cur = ggml_get_tensor(model->ctx, gguf_ctx->infos[i].name.data);
+        size_data += ggml_nbytes(cur);
+        if (cur->backend == GGML_BACKEND_CPU) {
+          size_pref += ggml_nbytes(cur);
+        }
+      }
+
+      std::unique_ptr<llama_mmap> mapping;
+      llama_mlock* lmlock = use_mlock ? &model->mlock_mmap : NULL;
+      llama_file file(model_file_path, "rb");
+      if (use_mmap) {
+        mapping.reset(new llama_mmap(&file, size_pref, ggml_is_numa()));
+        if (lmlock) {
+          lmlock->init(mapping->addr);
+        }
+      }
+
+      size_t done_size = 0;
+      for (int i = 0; i < n_tensors; i++) {
+        struct ggml_tensor* cur = ggml_get_tensor(model->ctx, gguf_ctx->infos[i].name.data);
+        GGML_ASSERT(cur);  // unused tensors should have been caught by load_data already
+
+        unsigned cur_percentage = 0;
+        llama_progress_callback progress_callback = NULL;
+        void* progress_callback_user_data = NULL;
+        if (progress_callback == NULL) {
+          progress_callback_user_data = &cur_percentage;
+          progress_callback = [](float progress, void* ctx) {
+            unsigned* cur_percentage_p = (unsigned*)ctx;
+            unsigned percentage = (unsigned)(100 * progress);
+            while (percentage > *cur_percentage_p) {
+              *cur_percentage_p = percentage;
+              LLAMA_LOG_INFO(".");
+              if (percentage >= 100) {
+                LLAMA_LOG_INFO("\n");
+              }
+            }
+          };
+        }
+
+        progress_callback((float)done_size / size_data, progress_callback_user_data);
+
+        // Load data for cur
+        const size_t offs = gguf_ctx->offset + gguf_ctx->infos[i].offset;
+        cur->data = (uint8_t*)mapping->addr + offs;
+
+        switch (cur->backend) {
+          case GGML_BACKEND_CPU:
+            if (use_mmap && lmlock) {
+              size_lock += ggml_nbytes(cur);
+              lmlock->grow_to(size_lock);
+            }
+            break;
+#ifdef GGML_USE_CUBLAS
+          case GGML_BACKEND_GPU:
+          case GGML_BACKEND_GPU_SPLIT:
+            // old code:
+            // ggml_cuda_transform_tensor(lt.data, lt.ggml_tensor);
+
+            // TODO: test if this works !!
+            ggml_cuda_transform_tensor(cur->data, cur);
+            if (!use_mmap) {
+              free(cur->data);
+            }
+            break;
+#endif
+          default:
+            continue;
+        }
+
+        done_size += ggml_nbytes(cur);
+      }
+    }
+  }
+
+  printf("\n");
 }

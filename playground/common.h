@@ -88,25 +88,22 @@ typedef uint16_t ggml_fp16_t;
 // floating point type used to accumulate sums
 typedef double ggml_float;
 
-typedef void (*ggml_to_float_t)(const void* GGML_RESTRICT x,
-                                float* GGML_RESTRICT y, int k);
-typedef void (*ggml_from_float_t)(const float* GGML_RESTRICT x,
-                                  void* GGML_RESTRICT y, int k);
-typedef void (*ggml_vec_dot_t)(const int n, float* GGML_RESTRICT s,
-                               const void* GGML_RESTRICT x,
+typedef void (*ggml_to_float_t)(const void* GGML_RESTRICT x, float* GGML_RESTRICT y, int k);
+typedef void (*ggml_from_float_t)(const float* GGML_RESTRICT x, void* GGML_RESTRICT y, int k);
+typedef void (*ggml_vec_dot_t)(const int n, float* GGML_RESTRICT s, const void* GGML_RESTRICT x,
                                const void* GGML_RESTRICT y);
 
-enum ggml_log_level {
-  GGML_LOG_LEVEL_ERROR = 2,
-  GGML_LOG_LEVEL_WARN = 3,
-  GGML_LOG_LEVEL_INFO = 4
-};
+enum ggml_log_level { GGML_LOG_LEVEL_ERROR = 2, GGML_LOG_LEVEL_WARN = 3, GGML_LOG_LEVEL_INFO = 4 };
 
-typedef void (*ggml_log_callback)(enum ggml_log_level level, const char * text, void * user_data);
+typedef void (*ggml_log_callback)(enum ggml_log_level level, const char* text, void* user_data);
 
 // =======================================================================
 // Data Structures
 // =======================================================================
+static const size_t kB = 1024;
+static const size_t MB = kB * kB;
+static const size_t GB = kB * kB * kB;
+
 struct gguf_header {
   uint32_t magic;
   uint32_t version;
@@ -222,6 +219,119 @@ enum ggml_type {
   GGML_TYPE_COUNT,
 };
 
+static const char* GGUF_TYPE_NAME[GGUF_TYPE_COUNT] = {
+    [GGUF_TYPE_UINT8] = "u8",    [GGUF_TYPE_INT8] = "i8",   [GGUF_TYPE_UINT16] = "u16",  [GGUF_TYPE_INT16] = "i16",
+    [GGUF_TYPE_UINT32] = "u32",  [GGUF_TYPE_INT32] = "i32", [GGUF_TYPE_FLOAT32] = "f32", [GGUF_TYPE_BOOL] = "bool",
+    [GGUF_TYPE_STRING] = "str",  [GGUF_TYPE_ARRAY] = "arr", [GGUF_TYPE_UINT64] = "u64",  [GGUF_TYPE_INT64] = "i64",
+    [GGUF_TYPE_FLOAT64] = "f64",
+};
+
+enum llm_kv {
+  LLM_KV_GENERAL_ARCHITECTURE,
+  LLM_KV_GENERAL_QUANTIZATION_VERSION,
+  LLM_KV_GENERAL_ALIGNMENT,
+  LLM_KV_GENERAL_NAME,
+  LLM_KV_GENERAL_AUTHOR,
+  LLM_KV_GENERAL_URL,
+  LLM_KV_GENERAL_DESCRIPTION,
+  LLM_KV_GENERAL_LICENSE,
+  LLM_KV_GENERAL_SOURCE_URL,
+  LLM_KV_GENERAL_SOURCE_HF_REPO,
+
+  LLM_KV_CONTEXT_LENGTH,
+  LLM_KV_EMBEDDING_LENGTH,
+  LLM_KV_BLOCK_COUNT,
+  LLM_KV_FEED_FORWARD_LENGTH,
+  LLM_KV_USE_PARALLEL_RESIDUAL,
+  LLM_KV_TENSOR_DATA_LAYOUT,
+
+  LLM_KV_ATTENTION_HEAD_COUNT,
+  LLM_KV_ATTENTION_HEAD_COUNT_KV,
+  LLM_KV_ATTENTION_MAX_ALIBI_BIAS,
+  LLM_KV_ATTENTION_CLAMP_KQV,
+  LLM_KV_ATTENTION_LAYERNORM_EPS,
+  LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,
+
+  LLM_KV_ROPE_DIMENSION_COUNT,
+  LLM_KV_ROPE_FREQ_BASE,
+  LLM_KV_ROPE_SCALE_LINEAR,
+
+  LLM_KV_TOKENIZER_MODEL,
+  LLM_KV_TOKENIZER_LIST,
+  LLM_KV_TOKENIZER_TOKEN_TYPE,
+  LLM_KV_TOKENIZER_SCORES,
+  LLM_KV_TOKENIZER_MERGES,
+  LLM_KV_TOKENIZER_BOS_ID,
+  LLM_KV_TOKENIZER_EOS_ID,
+  LLM_KV_TOKENIZER_UNK_ID,
+  LLM_KV_TOKENIZER_SEP_ID,
+  LLM_KV_TOKENIZER_PAD_ID,
+  LLM_KV_TOKENIZER_HF_JSON,
+  LLM_KV_TOKENIZER_RWKV,
+};
+
+static std::map<llm_kv, std::string> LLM_KV_NAMES = {
+    {LLM_KV_GENERAL_ARCHITECTURE, "general.architecture"},
+    {LLM_KV_GENERAL_QUANTIZATION_VERSION, "general.quantization_version"},
+    {LLM_KV_GENERAL_ALIGNMENT, "general.alignment"},
+    {LLM_KV_GENERAL_NAME, "general.name"},
+    {LLM_KV_GENERAL_AUTHOR, "general.author"},
+    {LLM_KV_GENERAL_URL, "general.url"},
+    {LLM_KV_GENERAL_DESCRIPTION, "general.description"},
+    {LLM_KV_GENERAL_LICENSE, "general.license"},
+    {LLM_KV_GENERAL_SOURCE_URL, "general.source.url"},
+    {LLM_KV_GENERAL_SOURCE_HF_REPO, "general.source.huggingface.repository"},
+
+    {LLM_KV_CONTEXT_LENGTH, "%s.context_length"},
+    {LLM_KV_EMBEDDING_LENGTH, "%s.embedding_length"},
+    {LLM_KV_BLOCK_COUNT, "%s.block_count"},
+    {LLM_KV_FEED_FORWARD_LENGTH, "%s.feed_forward_length"},
+    {LLM_KV_USE_PARALLEL_RESIDUAL, "%s.use_parallel_residual"},
+    {LLM_KV_TENSOR_DATA_LAYOUT, "%s.tensor_data_layout"},
+
+    {LLM_KV_ATTENTION_HEAD_COUNT, "%s.attention.head_count"},
+    {LLM_KV_ATTENTION_HEAD_COUNT_KV, "%s.attention.head_count_kv"},
+    {LLM_KV_ATTENTION_MAX_ALIBI_BIAS, "%s.attention.max_alibi_bias"},
+    {LLM_KV_ATTENTION_CLAMP_KQV, "%s.attention.clamp_kqv"},
+    {LLM_KV_ATTENTION_LAYERNORM_EPS, "%s.attention.layer_norm_epsilon"},
+    {LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, "%s.attention.layer_norm_rms_epsilon"},
+
+    {LLM_KV_ROPE_DIMENSION_COUNT, "%s.rope.dimension_count"},
+    {LLM_KV_ROPE_FREQ_BASE, "%s.rope.freq_base"},
+    {LLM_KV_ROPE_SCALE_LINEAR, "%s.rope.scale_linear"},
+
+    {LLM_KV_TOKENIZER_MODEL, "tokenizer.ggml.model"},
+    {LLM_KV_TOKENIZER_LIST, "tokenizer.ggml.tokens"},
+    {LLM_KV_TOKENIZER_TOKEN_TYPE, "tokenizer.ggml.token_type"},
+    {LLM_KV_TOKENIZER_SCORES, "tokenizer.ggml.scores"},
+    {LLM_KV_TOKENIZER_MERGES, "tokenizer.ggml.merges"},
+    {LLM_KV_TOKENIZER_BOS_ID, "tokenizer.ggml.bos_token_id"},
+    {LLM_KV_TOKENIZER_EOS_ID, "tokenizer.ggml.eos_token_id"},
+    {LLM_KV_TOKENIZER_UNK_ID, "tokenizer.ggml.unknown_token_id"},
+    {LLM_KV_TOKENIZER_SEP_ID, "tokenizer.ggml.seperator_token_id"},
+    {LLM_KV_TOKENIZER_PAD_ID, "tokenizer.ggml.padding_token_id"},
+    {LLM_KV_TOKENIZER_HF_JSON, "tokenizer.huggingface.json"},
+    {LLM_KV_TOKENIZER_RWKV, "tokenizer.rwkv.world"},
+};
+
+enum llm_arch {
+  LLM_ARCH_LLAMA,
+  LLM_ARCH_FALCON,
+  LLM_ARCH_BAICHUAN,
+  LLM_ARCH_GPT2,
+  LLM_ARCH_GPTJ,
+  LLM_ARCH_GPTNEOX,
+  LLM_ARCH_MPT,
+  LLM_ARCH_STARCODER,
+  LLM_ARCH_UNKNOWN,
+};
+
+static std::map<std::string, llm_arch> LLM_ARCH_NAMES = {
+    {"llama", LLM_ARCH_LLAMA},       {"falcon", LLM_ARCH_FALCON},       {"gpt2", LLM_ARCH_GPT2},
+    {"gptj", LLM_ARCH_GPTJ},         {"gptneox", LLM_ARCH_GPTNEOX},     {"mpt", LLM_ARCH_MPT},
+    {"baichuan", LLM_ARCH_BAICHUAN}, {"starcoder", LLM_ARCH_STARCODER},
+};
+
 struct gguf_tensor_info {
   struct gguf_str name;
 
@@ -230,8 +340,7 @@ struct gguf_tensor_info {
 
   enum ggml_type type;
 
-  uint64_t
-      offset;  // offset from start of `data`, must be a multiple of `ALIGNMENT`
+  uint64_t offset;  // offset from start of `data`, must be a multiple of `ALIGNMENT`
 
   // for writing API
   const void* data;
@@ -245,11 +354,7 @@ struct gguf_init_params {
   struct ggml_context** ctx;
 };
 
-enum ggml_object_type {
-  GGML_OBJECT_TENSOR,
-  GGML_OBJECT_GRAPH,
-  GGML_OBJECT_WORK_BUFFER
-};
+enum ggml_object_type { GGML_OBJECT_TENSOR, GGML_OBJECT_GRAPH, GGML_OBJECT_WORK_BUFFER };
 
 // ggml object
 struct ggml_object {
@@ -364,8 +469,8 @@ struct ggml_tensor {
   int64_t ne[GGML_MAX_DIMS];  // number of elements
   size_t nb[GGML_MAX_DIMS];   // stride in bytes:
                               // nb[0] = ggml_type_size(type)
-                             // nb[1] = nb[0]   * (ne[0] / ggml_blck_size(type))
-                             // + padding nb[i] = nb[i-1] * ne[i-1]
+  // nb[1] = nb[0]   * (ne[0] / ggml_blck_size(type))
+  // + padding nb[i] = nb[i-1] * ne[i-1]
 
   // compute data
   enum ggml_op op;
